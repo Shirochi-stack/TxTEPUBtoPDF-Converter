@@ -1,0 +1,3 @@
+weasyprint
+ebooklib
+PySide6
