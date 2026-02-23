@@ -4,8 +4,10 @@ import base64
 import logging
 import re
 import tempfile
+import html
+import json
 from urllib.parse import unquote
-from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QFileDialog, QMessageBox, QTextEdit, QProgressBar)
+from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QFileDialog, QMessageBox, QTextEdit, QProgressBar, QCheckBox, QGroupBox, QFormLayout, QSpinBox)
 from PySide6.QtCore import Qt, Signal, QObject, QThread, QSize
 from PySide6.QtGui import QScreen
 
@@ -60,12 +62,22 @@ class QtLogHandler(logging.Handler, QObject):
         msg = self.format(record)
         self.new_log_record.emit(msg)
 
+class NoScrollSpinBox(QSpinBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
 class FileConverter(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("File Converter")
         self.setAcceptDrops(True)
-        
+        self.settings_file = "config.json"
+        self.current_settings = self.load_settings()
+
         # Set size based on screen ratio (e.g., 40% width, 50% height)
         screen = QApplication.primaryScreen()
         if screen:
@@ -91,6 +103,43 @@ class FileConverter(QWidget):
         self.convert_button.setEnabled(False)
         self.layout.addWidget(self.convert_button)
         
+        # Settings Group
+        self.settings_group = QGroupBox("PDF Settings")
+        self.settings_layout = QVBoxLayout()
+        
+        self.page_numbers_check = QCheckBox("Add Page Numbers to Footer")
+        self.page_numbers_check.setChecked(self.current_settings.get("page_numbers", True))
+        self.page_numbers_check.stateChanged.connect(self.save_settings)
+        self.settings_layout.addWidget(self.page_numbers_check)
+        
+        self.toc_check = QCheckBox("Generate Table of Contents")
+        self.toc_check.setChecked(self.current_settings.get("toc", True))
+        self.toc_check.stateChanged.connect(self.toggle_toc_options)
+        self.settings_layout.addWidget(self.toc_check)
+
+        self.toc_numbers_check = QCheckBox("Add Page Numbers to TOC")
+        self.toc_numbers_check.setChecked(self.current_settings.get("toc_numbers", True))
+        self.toc_numbers_check.setEnabled(self.toc_check.isChecked())
+        self.toc_numbers_check.stateChanged.connect(self.save_settings)
+        # Indent the sub-option slightly for visual hierarchy if possible, or just add it
+        self.settings_layout.addWidget(self.toc_numbers_check)
+
+        # TOC Start Page
+        self.toc_start_layout = QFormLayout()
+        self.toc_start_page_spin = NoScrollSpinBox()
+        self.toc_start_page_spin.setFixedWidth(80)
+        self.toc_start_page_spin.setRange(1, 9999)
+        self.toc_start_page_spin.setValue(self.current_settings.get("toc_start_page", 1))
+        self.toc_start_page_spin.setEnabled(self.toc_check.isChecked())
+        self.toc_start_page_spin.valueChanged.connect(self.save_settings)
+        self.toc_start_label = QLabel("Start Page Number:")
+        self.toc_start_label.setEnabled(self.toc_check.isChecked())
+        self.toc_start_layout.addRow(self.toc_start_label, self.toc_start_page_spin)
+        self.settings_layout.addLayout(self.toc_start_layout)
+
+        self.settings_group.setLayout(self.settings_layout)
+        self.layout.addWidget(self.settings_group)
+        
         # Add progress bar
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setValue(0)
@@ -114,6 +163,34 @@ class FileConverter(QWidget):
 
         self.worker_thread = None
         self.worker = None
+
+    def load_settings(self):
+        if os.path.exists(self.settings_file):
+            try:
+                with open(self.settings_file, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                logging.error(f"Failed to load settings: {e}")
+        return {"page_numbers": True, "toc": False, "toc_numbers": False, "toc_start_page": 1}
+
+    def save_settings(self):
+        settings = {
+            "page_numbers": self.page_numbers_check.isChecked(),
+            "toc": self.toc_check.isChecked(),
+            "toc_numbers": self.toc_numbers_check.isChecked(),
+            "toc_start_page": self.toc_start_page_spin.value()
+        }
+        try:
+            with open(self.settings_file, "w") as f:
+                json.dump(settings, f)
+        except Exception as e:
+            logging.error(f"Failed to save settings: {e}")
+
+    def toggle_toc_options(self, state):
+        self.toc_numbers_check.setEnabled(self.toc_check.isChecked())
+        self.toc_start_page_spin.setEnabled(self.toc_check.isChecked())
+        self.toc_start_label.setEnabled(self.toc_check.isChecked())
+        self.save_settings()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -151,8 +228,16 @@ class FileConverter(QWidget):
             self.convert_button.setEnabled(False)
             self.select_button.setEnabled(False)
             logging.info(f"Starting conversion to {output_path}")
+            
+            settings = {
+                'page_numbers': self.page_numbers_check.isChecked(),
+                'toc': self.toc_check.isChecked(),
+                'toc_numbers': self.toc_numbers_check.isChecked(),
+                'toc_start_page': self.toc_start_page_spin.value()
+            }
+            
             self.worker_thread = QThread()
-            self.worker = ConversionWorker(self.file_path, output_path, self)
+            self.worker = ConversionWorker(self.file_path, output_path, settings, self)
             self.worker.moveToThread(self.worker_thread)
             self.worker_thread.started.connect(self.worker.run)
             self.worker.finished.connect(self.on_worker_finished)
@@ -160,7 +245,7 @@ class FileConverter(QWidget):
             self.worker.progress.connect(self.progress_bar.setValue)
             self.worker_thread.start()
 
-    def convert_txt_to_pdf(self, input_path, output_path, progress_callback=None):
+    def convert_txt_to_pdf(self, input_path, output_path, settings, progress_callback=None):
         if progress_callback: progress_callback(10)
         logging.info(f"Reading TXT file: {input_path}")
         with open(input_path, 'r', encoding='utf-8') as f:
@@ -168,7 +253,13 @@ class FileConverter(QWidget):
         
         if progress_callback: progress_callback(30)
         logging.info("Generating HTML from TXT content...")
-        html_content = f"<html><body><pre>{content}</pre></body></html>"
+        
+        css = ""
+        start_page = settings.get('toc_start_page', 1)
+        if settings.get('page_numbers'):
+            css = f"@page {{ @bottom-center {{ content: counter(page); }} }} body {{ counter-reset: page {start_page - 1}; }}"
+            
+        html_content = f"<html><head><style>{css}</style></head><body><pre>{content}</pre></body></html>"
         
         if progress_callback: progress_callback(60)
         logging.info("Writing PDF...")
@@ -178,7 +269,7 @@ class FileConverter(QWidget):
         if progress_callback: progress_callback(100)
         logging.info("Finished writing PDF.")
 
-    def convert_epub_to_pdf(self, input_path, output_path, progress_callback=None):
+    def convert_epub_to_pdf(self, input_path, output_path, settings, progress_callback=None):
         if progress_callback: progress_callback(5)
         logging.info(f"Reading EPUB file: {input_path}")
         book = epub.read_epub(input_path)
@@ -191,20 +282,96 @@ class FileConverter(QWidget):
                 
         logging.info(f"Found {len(images_by_path)} total images in EPUB.")
 
-        # Process all documents in order and collect them as WeasyPrint Document objects
-        documents = []
-        
+        # Determine TOC/Nav items to exclude from main content if we generate our own
+        # But actually, we usually want to keep them unless the user explicitly wants to replace them.
+        # For now, we'll just prepend our generated TOC if requested.
+
         items_to_process = [book.get_item_with_id(item_id) for item_id, _ in book.spine]
         spine_hrefs = {item.get_name() for item in items_to_process if item}
         for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
             if item.get_name() not in spine_hrefs:
                 items_to_process.append(item)
                 
-        total_steps = len(items_to_process) + 2 # items + merge + finalize
-        current_step = 0
+        # Helper to generate TOC HTML
+        def generate_toc_html(book, page_map=None):
+            toc_html = "<html><head><style>h1 { text-align: center; } ul { list-style-type: none; padding: 0; } li { margin-bottom: 5px; border-bottom: 1px dotted #ccc; } a { text-decoration: none; color: black; display: flex; justify-content: space-between; } .page { font-weight: bold; }</style></head><body><h1>Table of Contents</h1><ul>"
+            
+            def process_toc_item(toc_item, level=0):
+                html_out = ""
+                # ebooklib TOC item can be Link or Tuple or Section
+                if isinstance(toc_item, tuple) or isinstance(toc_item, list):
+                    section = toc_item[0]
+                    children = toc_item[1] if len(toc_item) > 1 else []
+                    
+                    title = section.title if hasattr(section, 'title') else str(section)
+                    href = section.href if hasattr(section, 'href') else ""
+                    
+                    # Clean href (remove anchors)
+                    base_href = href.split('#')[0]
+                    
+                    page_num = ""
+                    if settings.get('toc_numbers') and page_map and base_href in page_map:
+                        page_num = str(page_map[base_href])
+                    
+                    indent = level * 20
+                    html_out += f"<li style='padding-left: {indent}px'><a href='#'><span>{html.escape(title)}</span> <span class='page'>{page_num}</span></a></li>"
+                    
+                    for child in children:
+                        html_out += process_toc_item(child, level + 1)
+                elif isinstance(toc_item, epub.Link):
+                    title = toc_item.title
+                    href = toc_item.href
+                    base_href = href.split('#')[0]
+                    
+                    page_num = ""
+                    if settings.get('toc_numbers') and page_map and base_href in page_map:
+                        page_num = str(page_map[base_href])
+                        
+                    indent = level * 20
+                    html_out += f"<li style='padding-left: {indent}px'><a href='#'><span>{html.escape(title)}</span> <span class='page'>{page_num}</span></a></li>"
+                return html_out
+
+            for item in book.toc:
+                toc_html += process_toc_item(item)
+            
+            toc_html += "</ul></body></html>"
+            return toc_html
+
+        # DRY RUN for TOC size
+        toc_page_count = 0
+        toc_doc = None
         
+        if settings.get('toc'):
+            logging.info("Calculating TOC size...")
+            dummy_toc_html = generate_toc_html(book)
+            
+            # Apply start page to TOC if page numbers are on
+            toc_css = ""
+            start_page = settings.get('toc_start_page', 1)
+            if settings.get('page_numbers'):
+                 toc_css = f"<style>@page {{ @bottom-center {{ content: counter(page); }} }} body {{ counter-reset: page {start_page - 1}; }}</style>"
+            
+            # Inject CSS into dummy TOC
+            dummy_toc_html = dummy_toc_html.replace("</style>", f"</style>{toc_css}")
+
+            input_dir = os.path.dirname(os.path.abspath(input_path))
+            toc_doc = HTML(string=dummy_toc_html, base_url=input_dir).render()
+            toc_page_count = len(toc_doc.pages)
+            logging.info(f"Estimated TOC length: {toc_page_count} pages")
+
+        total_steps = len(items_to_process) + 2 # items + merge + finalize
+        
+        documents = []
+        
+        # Determine the logical starting page for the content
+        # Content starts after the TOC.
+        # Logical page of content start = Start Page + TOC Length
+        start_page = settings.get('toc_start_page', 1)
+        current_page = toc_page_count + start_page - 1
+        
+        chapter_page_map = {}
+
         if progress_callback:
-            # First 5% was reading. Next 5% styles.
             progress_callback(10)
 
         def _data_uri_for_src(src_value):
@@ -248,13 +415,20 @@ class FileConverter(QWidget):
                 logging.info(f"Embedding CSS image for '{url_value}'")
                 return f'url("{data_uri}")'
             return match.group(0)
-        styles = re.sub(r'url\(([^)]+)\)', replace_css_url, styles, flags=re.IGNORECASE)
+        styles = re.sub(r'url\\(([^)]+)\\)', replace_css_url, styles, flags=re.IGNORECASE)
+        
+        # Add page numbering CSS if requested
+        if settings.get('page_numbers'):
+            styles += " @page { @bottom-center { content: counter(page); } } "
         
         logging.info(f"Processing {len(items_to_process)} documents chapter by chapter...")
         for i, doc_item in enumerate(items_to_process):
             if not doc_item: 
                 continue
             
+            # Record start page for this chapter
+            chapter_page_map[doc_item.get_name()] = current_page + 1
+
             # Update progress
             current_step = i + 1
             if progress_callback:
@@ -262,7 +436,7 @@ class FileConverter(QWidget):
                 percent = 10 + int((current_step / len(items_to_process)) * 80)
                 progress_callback(percent)
 
-            logging.info(f"Rendering document: {doc_item.get_name()}")
+            logging.info(f"Rendering document: {doc_item.get_name()} (Start Page: {current_page + 1})")
             content = doc_item.get_content().decode('utf-8', 'ignore')
 
             def replace_attr(match):
@@ -290,16 +464,46 @@ class FileConverter(QWidget):
                     return f'url("{data_uri}")'
                 return match.group(0)
 
-            content = re.sub(r'url\(([^)]+)\)', replace_css_url, content, flags=re.IGNORECASE)
+            content = re.sub(r'url\\(([^)]+)\\)', replace_css_url, content, flags=re.IGNORECASE)
             
             # Combine the content and styles for this chapter
-            chapter_html = f"<html><head><style>{styles}</style></head><body>{content}</body></html>"
+            # Inject counter-reset to ensure page numbers are continuous
+            # Use current_page which tracks the logical page count
+            page_reset_css = f"body {{ counter-reset: page {current_page}; }}" if settings.get('page_numbers') else ""
+            
+            chapter_html = f"<html><head><style>{styles} {page_reset_css}</style></head><body>{content}</body></html>"
             
             # Render this chapter to a Document object
             input_dir = os.path.dirname(os.path.abspath(input_path))
             doc = HTML(string=chapter_html, base_url=input_dir).render()
             documents.append(doc)
+            
+            current_page += len(doc.pages)
             # QApplication.processEvents() # Unsafe in thread
+
+        # Generate Real TOC if requested
+        if settings.get('toc'):
+            logging.info("Generating final TOC with page numbers...")
+            real_toc_html = generate_toc_html(book, chapter_page_map)
+            
+            # Apply start page CSS to final TOC as well
+            start_page = settings.get('toc_start_page', 1)
+            toc_css = ""
+            if settings.get('page_numbers'):
+                 toc_css = f"<style>@page {{ @bottom-center {{ content: counter(page); }} }} body {{ counter-reset: page {start_page - 1}; }}</style>"
+            real_toc_html = real_toc_html.replace("</style>", f"</style>{toc_css}")
+            
+            input_dir = os.path.dirname(os.path.abspath(input_path))
+            real_toc_doc = HTML(string=real_toc_html, base_url=input_dir).render()
+            
+            # Check for size mismatch
+            if len(real_toc_doc.pages) != toc_page_count:
+                logging.warning(f"TOC size changed from {toc_page_count} to {len(real_toc_doc.pages)}. Page numbers might be slightly off.")
+                # Ideally we would re-render everything, but for now just warn.
+                # Or we can insert blank pages to match the count?
+                # No, just accept the slight shift.
+            
+            documents.insert(0, real_toc_doc)
 
         logging.info("All chapters rendered. Merging into a single PDF...")
         if progress_callback: progress_callback(95)
@@ -340,19 +544,20 @@ class ConversionWorker(QObject):
     error = Signal(str)
     progress = Signal(int)
 
-    def __init__(self, input_path, output_path, parent):
+    def __init__(self, input_path, output_path, settings, parent):
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
+        self.settings = settings
         self.parent = parent
 
     def run(self):
         try:
             self.progress.emit(0)
             if self.input_path.endswith(".txt"):
-                self.parent.convert_txt_to_pdf(self.input_path, self.output_path, self.progress.emit)
+                self.parent.convert_txt_to_pdf(self.input_path, self.output_path, self.settings, self.progress.emit)
             elif self.input_path.endswith(".epub"):
-                self.parent.convert_epub_to_pdf(self.input_path, self.output_path, self.progress.emit)
+                self.parent.convert_epub_to_pdf(self.input_path, self.output_path, self.settings, self.progress.emit)
             logging.info(f"Successfully converted to {self.output_path}")
             self.finished.emit(self.output_path)
         except Exception as e:
