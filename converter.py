@@ -5,8 +5,9 @@ import logging
 import re
 import tempfile
 from urllib.parse import unquote
-from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QFileDialog, QMessageBox, QTextEdit)
-from PySide6.QtCore import Qt, Signal, QObject, QThread
+from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QFileDialog, QMessageBox, QTextEdit, QProgressBar)
+from PySide6.QtCore import Qt, Signal, QObject, QThread, QSize
+from PySide6.QtGui import QScreen
 
 # --- GTK/MSYS2 DLLs for WeasyPrint (PDF) ---
 gtk_folder = os.environ.get('GTK_FOLDER', '')
@@ -63,7 +64,17 @@ class FileConverter(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("File Converter")
-        self.resize(500, 400)
+        self.setAcceptDrops(True)
+        
+        # Set size based on screen ratio (e.g., 40% width, 50% height)
+        screen = QApplication.primaryScreen()
+        if screen:
+            screen_geometry = screen.availableGeometry()
+            width = int(screen_geometry.width() * 0.4)
+            height = int(screen_geometry.height() * 0.5)
+            self.resize(width, height)
+        else:
+            self.resize(500, 400) # Fallback
 
         self.layout = QVBoxLayout(self)
 
@@ -79,6 +90,11 @@ class FileConverter(QWidget):
         self.convert_button.clicked.connect(self.on_convert_file)
         self.convert_button.setEnabled(False)
         self.layout.addWidget(self.convert_button)
+        
+        # Add progress bar
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setValue(0)
+        self.layout.addWidget(self.progress_bar)
 
         # Add log viewer
         self.log_viewer = QTextEdit(self)
@@ -98,6 +114,28 @@ class FileConverter(QWidget):
 
         self.worker_thread = None
         self.worker = None
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    if file_path.lower().endswith(('.epub', '.txt')):
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    if file_path.lower().endswith(('.epub', '.txt')):
+                        self.file_path = file_path
+                        self.file_label.setText(os.path.basename(self.file_path))
+                        self.convert_button.setEnabled(True)
+                        logging.info(f"Selected file via drag & drop: {self.file_path}")
+                        return
 
     def on_select_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select File", "", "EPUB and TXT files (*.epub *.txt)")
@@ -119,28 +157,39 @@ class FileConverter(QWidget):
             self.worker_thread.started.connect(self.worker.run)
             self.worker.finished.connect(self.on_worker_finished)
             self.worker.error.connect(self.on_worker_error)
+            self.worker.progress.connect(self.progress_bar.setValue)
             self.worker_thread.start()
 
-    def convert_txt_to_pdf(self, input_path, output_path):
+    def convert_txt_to_pdf(self, input_path, output_path, progress_callback=None):
+        if progress_callback: progress_callback(10)
         logging.info(f"Reading TXT file: {input_path}")
         with open(input_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
+        if progress_callback: progress_callback(30)
         logging.info("Generating HTML from TXT content...")
         html_content = f"<html><body><pre>{content}</pre></body></html>"
         
+        if progress_callback: progress_callback(60)
         logging.info("Writing PDF...")
         # Provide a base_url to resolve relative paths for CSS, fonts, etc.
         input_dir = os.path.dirname(os.path.abspath(input_path))
         HTML(string=html_content, base_url=input_dir).write_pdf(output_path)
+        if progress_callback: progress_callback(100)
         logging.info("Finished writing PDF.")
 
-    def convert_epub_to_pdf(self, input_path, output_path):
+    def convert_epub_to_pdf(self, input_path, output_path, progress_callback=None):
+        if progress_callback: progress_callback(5)
         logging.info(f"Reading EPUB file: {input_path}")
         book = epub.read_epub(input_path)
         
-        images_by_path = {item.get_name().replace('\\', '/'): item for item in book.get_items_of_type(ebooklib.ITEM_IMAGE)}
-        logging.info(f"Found {len(images_by_path)} total images in EPUB manifest.")
+        # Collect all image items (including those ebooklib might miss if mimetype is unusual like webp)
+        images_by_path = {}
+        for item in book.get_items():
+            if item.get_type() == ebooklib.ITEM_IMAGE or (item.media_type and item.media_type.startswith('image/')):
+                images_by_path[item.get_name().replace('\\', '/')] = item
+                
+        logging.info(f"Found {len(images_by_path)} total images in EPUB.")
 
         # Process all documents in order and collect them as WeasyPrint Document objects
         documents = []
@@ -150,27 +199,41 @@ class FileConverter(QWidget):
         for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
             if item.get_name() not in spine_hrefs:
                 items_to_process.append(item)
+                
+        total_steps = len(items_to_process) + 2 # items + merge + finalize
+        current_step = 0
+        
+        if progress_callback:
+            # First 5% was reading. Next 5% styles.
+            progress_callback(10)
 
         def _data_uri_for_src(src_value):
             if not src_value or src_value.startswith("data:"):
                 return None
+            
+            # Normalize path
             raw = unquote(src_value).replace("\\", "/")
             if raw.startswith("file:///"):
                 raw = raw[8:]
-            # Find images/ path segment
-            m = re.search(r"(images/[^?#]+)", raw, flags=re.IGNORECASE)
-            image_key = m.group(1) if m else None
-            if image_key and image_key in images_by_path:
-                item = images_by_path[image_key]
+            
+            # 1. Try exact match
+            # Some paths might be absolute if resolved by base_url, we need relative to epub root
+            # But here src_value is what's in the HTML.
+            
+            # If the HTML has src="images/foo.webp", raw is "images/foo.webp".
+            if raw in images_by_path:
+                item = images_by_path[raw]
                 b64 = base64.b64encode(item.get_content()).decode("utf-8")
                 return f"data:{item.media_type};base64,{b64}"
-            if image_key:
-                # Fallback by filename
-                filename = os.path.basename(image_key)
-                for path, item in images_by_path.items():
-                    if os.path.basename(path) == filename:
-                        b64 = base64.b64encode(item.get_content()).decode("utf-8")
-                        return f"data:{item.media_type};base64,{b64}"
+            
+            # 2. Try match by filename (fallback)
+            # This helps if paths are somehow relative or absolute in a way we didn't expect
+            filename = os.path.basename(raw)
+            for path, item in images_by_path.items():
+                if os.path.basename(path) == filename:
+                    b64 = base64.b64encode(item.get_content()).decode("utf-8")
+                    return f"data:{item.media_type};base64,{b64}"
+            
             return None
 
         styles = ""
@@ -188,10 +251,17 @@ class FileConverter(QWidget):
         styles = re.sub(r'url\(([^)]+)\)', replace_css_url, styles, flags=re.IGNORECASE)
         
         logging.info(f"Processing {len(items_to_process)} documents chapter by chapter...")
-        for doc_item in items_to_process:
+        for i, doc_item in enumerate(items_to_process):
             if not doc_item: 
                 continue
             
+            # Update progress
+            current_step = i + 1
+            if progress_callback:
+                # Map steps to 10-90% range
+                percent = 10 + int((current_step / len(items_to_process)) * 80)
+                progress_callback(percent)
+
             logging.info(f"Rendering document: {doc_item.get_name()}")
             content = doc_item.get_content().decode('utf-8', 'ignore')
 
@@ -229,18 +299,25 @@ class FileConverter(QWidget):
             input_dir = os.path.dirname(os.path.abspath(input_path))
             doc = HTML(string=chapter_html, base_url=input_dir).render()
             documents.append(doc)
-            QApplication.processEvents() # Keep GUI responsive
+            # QApplication.processEvents() # Unsafe in thread
 
         logging.info("All chapters rendered. Merging into a single PDF...")
+        if progress_callback: progress_callback(95)
+        
         # Get all pages from all documents and write to the final PDF
         all_pages = [page for doc in documents for page in doc.pages]
+        logging.info(f"Total pages collected: {len(all_pages)}")
+        logging.info("Writing PDF to disk... (This may take some time for large files)")
+        
         documents[0].copy(all_pages).write_pdf(output_path)
         
         logging.info("Finished writing PDF.")
+        if progress_callback: progress_callback(100)
 
     def on_worker_finished(self, output_path):
         self.convert_button.setEnabled(True)
         self.select_button.setEnabled(True)
+        self.progress_bar.setValue(100)
         QMessageBox.information(self, "Success", f"Successfully converted to {output_path}")
         if self.worker_thread:
             self.worker_thread.quit()
@@ -261,6 +338,7 @@ class FileConverter(QWidget):
 class ConversionWorker(QObject):
     finished = Signal(str)
     error = Signal(str)
+    progress = Signal(int)
 
     def __init__(self, input_path, output_path, parent):
         super().__init__()
@@ -270,10 +348,11 @@ class ConversionWorker(QObject):
 
     def run(self):
         try:
+            self.progress.emit(0)
             if self.input_path.endswith(".txt"):
-                self.parent.convert_txt_to_pdf(self.input_path, self.output_path)
+                self.parent.convert_txt_to_pdf(self.input_path, self.output_path, self.progress.emit)
             elif self.input_path.endswith(".epub"):
-                self.parent.convert_epub_to_pdf(self.input_path, self.output_path)
+                self.parent.convert_epub_to_pdf(self.input_path, self.output_path, self.progress.emit)
             logging.info(f"Successfully converted to {self.output_path}")
             self.finished.emit(self.output_path)
         except Exception as e:
