@@ -1,66 +1,107 @@
-import sys
-import os
-import base64
-import logging
-import re
-import tempfile
-import html
 import json
-from urllib.parse import unquote
-from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QFileDialog, QMessageBox, QTextEdit, QProgressBar, QCheckBox, QGroupBox, QFormLayout, QSpinBox)
-from PySide6.QtCore import Qt, Signal, QObject, QThread, QSize
-from PySide6.QtGui import QScreen
+import os
+import sys
+import tempfile
+import threading
+from pathlib import Path
 
-# --- GTK/MSYS2 DLLs for WeasyPrint (PDF) ---
-gtk_folder = os.environ.get('GTK_FOLDER', '')
-msys2_bin_candidates = [
-    os.path.join(gtk_folder, 'bin') if gtk_folder else '',
-    r'C:\msys64\mingw64\bin',
-    r'C:\msys64\ucrt64\bin',
-    r'D:\a\_temp\msys64\mingw64\bin',
-]
-msys2_bin = None
-for candidate in msys2_bin_candidates:
-    if candidate and os.path.exists(candidate):
-        msys2_bin = candidate
-        break
-if msys2_bin:
-    os.environ['PATH'] = msys2_bin + os.pathsep + os.environ.get('PATH', '')
-def _ensure_fontconfig():
-    if os.environ.get("FONTCONFIG_FILE") and os.environ.get("FONTCONFIG_PATH"):
-        return
-    temp_dir = tempfile.mkdtemp(prefix="fontconfig_")
-    conf_path = os.path.join(temp_dir, "fonts.conf")
-    if not os.path.exists(conf_path):
-        with open(conf_path, "w", encoding="utf-8") as f:
-            f.write("""<?xml version="1.0"?>
-<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
-<fontconfig>
-  <dir>WINDOWSFONTDIR</dir>
-  <cachedir>~/.cache/fontconfig</cachedir>
-</fontconfig>
-""")
-    os.environ["FONTCONFIG_FILE"] = conf_path
-    os.environ["FONTCONFIG_PATH"] = temp_dir
-    os.environ["FC_CONFIG_FILE"] = conf_path
+# Windowed (no-console) builds have no stdout/stderr; some libraries write to them.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
 
-_ensure_fontconfig()
+from PySide6.QtCore import QPointF, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import (QColor, QDesktopServices, QKeySequence, QPainter, QPalette, QPen,
+                           QPixmap, QShortcut)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox,
+                               QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QMessageBox, QProgressBar, QPushButton,
+                               QRadioButton, QSpinBox, QStackedWidget, QTextEdit, QVBoxLayout,
+                               QWidget)
 
-from weasyprint import HTML
-import ebooklib
-from ebooklib import epub
+import engine
 
-# Custom handler to redirect logging to a Qt widget
-class QtLogHandler(logging.Handler, QObject):
-    new_log_record = Signal(str)
+APP_NAME = "File Converter"
+APP_VERSION = "2.0"
+APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
+SETTINGS_FILE = APP_DIR / "config.json"
+FILE_FILTER = "Supported files (*.txt *.pdf *.epub);;All files (*)"
 
-    def __init__(self):
-        super().__init__()
-        QObject.__init__(self)
+STYLE = """
+QWidget { background: #1e1e1e; color: #e6e6e6; font-family: "Segoe UI"; font-size: 10pt; }
+QLabel#title { font-size: 21pt; font-weight: 700; }
+QLabel#heading { font-size: 10.5pt; font-weight: 700; }
+QLabel#hint { color: #9a9a9a; font-size: 8.5pt; }
+QLabel#accent { color: #f1c40f; font-weight: 700; }
+QLabel#naver { color: #e74c3c; font-weight: 700; }
+QFrame#panel { background: #2a2a2a; border-radius: 8px; }
+QFrame#panel QLabel, QFrame#panel QCheckBox, QFrame#panel QRadioButton { background: transparent; }
+QFrame#side { background: #1f2733; border-radius: 8px; }
+QFrame#side QLabel, QFrame#side QStackedWidget, QFrame#side QStackedWidget > QWidget { background: transparent; }
+QListWidget, QTextEdit { background: #161616; border: 1px solid #333; border-radius: 6px; padding: 4px; }
+QListWidget::item:selected { background: #1f6aa5; color: white; }
+QLineEdit { background: #2f2f2f; border: 1px solid #555; border-radius: 5px; padding: 4px 6px; }
+QFrame#side QLineEdit { background: #2f2f2f; }
+QLineEdit:focus { border-color: #3b8ed0; }
+QPushButton { background: #1f6aa5; color: white; border: none; border-radius: 6px; padding: 8px 16px; }
+QPushButton:hover { background: #2a7fc0; }
+QPushButton:disabled { background: #3a3a3a; color: #777; }
+QPushButton#ghost { background: #3a3a3a; }
+QPushButton#ghost:hover { background: #4a4a4a; }
+QPushButton#go { background: #2d8a4e; font-size: 12.5pt; font-weight: 700; padding: 11px 30px; }
+QPushButton#go:hover { background: #36a35d; }
+QPushButton#go:disabled { background: #2a4a35; color: #8aa; }
+QPushButton#merge { background: #16a085; font-weight: 700; }
+QPushButton#merge:hover { background: #1abc9c; }
+QPushButton#merge:disabled { background: #1d4a43; color: #8aa; }
+QPushButton#stop { background: #a83232; }
+QPushButton#stop:hover { background: #c0392b; }
+QPushButton#stop:disabled { background: #3a3a3a; color: #777; }
+QCheckBox, QRadioButton { spacing: 7px; padding: 2px 0; }
+QCheckBox:disabled, QRadioButton:disabled, QLabel:disabled { color: #6f6f6f; }
+QCheckBox::indicator, QRadioButton::indicator { width: 14px; height: 14px; border: 2px solid #8a8a8a; background: #262626; }
+QCheckBox::indicator { border-radius: 4px; }
+QRadioButton::indicator { border-radius: 9px; }
+QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: #3b8ed0; }
+QCheckBox::indicator:checked { background: #1f6aa5; border-color: #1f6aa5; image: url(TICK_ICON); }
+QRadioButton::indicator:checked { width: 8px; height: 8px; border: 5px solid #1f6aa5; background: #ffffff; }
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled { border-color: #4a4a4a; }
+QCheckBox::indicator:checked:disabled { background: #3d5366; border-color: #3d5366; }
+QRadioButton#blue { color: #3b9ee0; }
+QRadioButton#red { color: #e74c3c; }
+QCheckBox#accent { color: #f1c40f; }
+QProgressBar { background: #2f2f2f; border: none; border-radius: 4px; height: 9px; }
+QProgressBar::chunk { background: #1f8fe0; border-radius: 4px; }
+"""
 
-    def emit(self, record):
-        msg = self.format(record)
-        self.new_log_record.emit(msg)
+
+def apply_theme(app):
+    """Fusion + a dark palette so check marks, radio dots and spin arrows draw natively."""
+    app.setStyle("Fusion")
+    palette = QPalette()
+    for role, color in ((QPalette.Window, "#1e1e1e"), (QPalette.WindowText, "#e6e6e6"),
+                        (QPalette.Base, "#2f2f2f"), (QPalette.AlternateBase, "#262626"),
+                        (QPalette.Text, "#e6e6e6"), (QPalette.Button, "#3a3a3a"),
+                        (QPalette.ButtonText, "#e6e6e6"), (QPalette.ToolTipBase, "#2a2a2a"),
+                        (QPalette.ToolTipText, "#e6e6e6"), (QPalette.PlaceholderText, "#8a8a8a"),
+                        (QPalette.Highlight, "#1f6aa5"), (QPalette.HighlightedText, "#ffffff")):
+        palette.setColor(role, QColor(color))
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        palette.setColor(QPalette.Disabled, role, QColor("#6f6f6f"))
+    app.setPalette(palette)
+    # Qt style sheets can only take the check mark from an image file, so draw one.
+    tick = QPixmap(28, 28)
+    tick.fill(Qt.transparent)
+    painter = QPainter(tick)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(QColor("white"), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    painter.drawPolyline([QPointF(6, 15), QPointF(12, 21), QPointF(22, 8)])
+    painter.end()
+    tick_path = os.path.join(tempfile.gettempdir(), "file_converter_tick.png")
+    tick.save(tick_path)
+    app.setStyleSheet(STYLE.replace("TICK_ICON", tick_path.replace("\\", "/")))
+
 
 class NoScrollSpinBox(QSpinBox):
     def __init__(self, parent=None):
@@ -70,504 +111,579 @@ class NoScrollSpinBox(QSpinBox):
     def wheelEvent(self, event):
         event.ignore()
 
-class FileConverter(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("File Converter")
-        self.setAcceptDrops(True)
-        self.settings_file = "config.json"
-        self.current_settings = self.load_settings()
 
-        # Set size based on screen ratio (e.g., 40% width, 50% height)
-        screen = QApplication.primaryScreen()
-        if screen:
-            screen_geometry = screen.availableGeometry()
-            width = int(screen_geometry.width() * 0.4)
-            height = int(screen_geometry.height() * 0.5)
-            self.resize(width, height)
-        else:
-            self.resize(500, 400) # Fallback
-
-        self.layout = QVBoxLayout(self)
-
-        self.file_label = QLabel("No file selected", self)
-        self.file_label.setAlignment(Qt.AlignCenter)
-        self.layout.addWidget(self.file_label)
-
-        self.select_button = QPushButton("Select File", self)
-        self.select_button.clicked.connect(self.on_select_file)
-        self.layout.addWidget(self.select_button)
-
-        self.convert_button = QPushButton("Convert to PDF", self)
-        self.convert_button.clicked.connect(self.on_convert_file)
-        self.convert_button.setEnabled(False)
-        self.layout.addWidget(self.convert_button)
-        
-        # Settings Group
-        self.settings_group = QGroupBox("PDF Settings")
-        self.settings_layout = QVBoxLayout()
-        
-        self.page_numbers_check = QCheckBox("Add Page Numbers to Footer")
-        self.page_numbers_check.setChecked(self.current_settings.get("page_numbers", True))
-        self.page_numbers_check.stateChanged.connect(self.save_settings)
-        self.settings_layout.addWidget(self.page_numbers_check)
-        
-        self.toc_check = QCheckBox("Generate Table of Contents")
-        self.toc_check.setChecked(self.current_settings.get("toc", True))
-        self.toc_check.stateChanged.connect(self.toggle_toc_options)
-        self.settings_layout.addWidget(self.toc_check)
-
-        self.toc_numbers_check = QCheckBox("Add Page Numbers to TOC")
-        self.toc_numbers_check.setChecked(self.current_settings.get("toc_numbers", True))
-        self.toc_numbers_check.setEnabled(self.toc_check.isChecked())
-        self.toc_numbers_check.stateChanged.connect(self.save_settings)
-        # Indent the sub-option slightly for visual hierarchy if possible, or just add it
-        self.settings_layout.addWidget(self.toc_numbers_check)
-
-        # TOC Start Page
-        self.toc_start_layout = QFormLayout()
-        self.toc_start_page_spin = NoScrollSpinBox()
-        self.toc_start_page_spin.setFixedWidth(80)
-        self.toc_start_page_spin.setRange(1, 9999)
-        self.toc_start_page_spin.setValue(self.current_settings.get("toc_start_page", 1))
-        self.toc_start_page_spin.setEnabled(self.toc_check.isChecked())
-        self.toc_start_page_spin.valueChanged.connect(self.save_settings)
-        self.toc_start_label = QLabel("Start Page Number:")
-        self.toc_start_label.setEnabled(self.toc_check.isChecked())
-        self.toc_start_layout.addRow(self.toc_start_label, self.toc_start_page_spin)
-        self.settings_layout.addLayout(self.toc_start_layout)
-
-        self.settings_group.setLayout(self.settings_layout)
-        self.layout.addWidget(self.settings_group)
-        
-        # Add progress bar
-        self.progress_bar = QProgressBar(self)
-        self.progress_bar.setValue(0)
-        self.layout.addWidget(self.progress_bar)
-
-        # Add log viewer
-        self.log_viewer = QTextEdit(self)
-        self.log_viewer.setReadOnly(True)
-        self.layout.addWidget(self.log_viewer)
-
-        self.file_path = None
-
-        # Setup logging
-        self.log_handler = QtLogHandler()
-        self.log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        self.log_handler.new_log_record.connect(self.log_viewer.append)
-        
-        # Add the custom handler to the root logger
-        logging.getLogger().addHandler(self.log_handler)
-        logging.getLogger().setLevel(logging.INFO)
-
-        self.worker_thread = None
-        self.worker = None
-
-    def load_settings(self):
-        if os.path.exists(self.settings_file):
-            try:
-                with open(self.settings_file, "r") as f:
-                    return json.load(f)
-            except Exception as e:
-                logging.error(f"Failed to load settings: {e}")
-        return {"page_numbers": True, "toc": False, "toc_numbers": False, "toc_start_page": 1}
-
-    def save_settings(self):
-        settings = {
-            "page_numbers": self.page_numbers_check.isChecked(),
-            "toc": self.toc_check.isChecked(),
-            "toc_numbers": self.toc_numbers_check.isChecked(),
-            "toc_start_page": self.toc_start_page_spin.value()
-        }
-        try:
-            with open(self.settings_file, "w") as f:
-                json.dump(settings, f)
-        except Exception as e:
-            logging.error(f"Failed to save settings: {e}")
-
-    def toggle_toc_options(self, state):
-        self.toc_numbers_check.setEnabled(self.toc_check.isChecked())
-        self.toc_start_page_spin.setEnabled(self.toc_check.isChecked())
-        self.toc_start_label.setEnabled(self.toc_check.isChecked())
-        self.save_settings()
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.isLocalFile():
-                    file_path = url.toLocalFile()
-                    if file_path.lower().endswith(('.epub', '.txt')):
-                        event.acceptProposedAction()
-                        return
-        event.ignore()
-
-    def dropEvent(self, event):
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.isLocalFile():
-                    file_path = url.toLocalFile()
-                    if file_path.lower().endswith(('.epub', '.txt')):
-                        self.file_path = file_path
-                        self.file_label.setText(os.path.basename(self.file_path))
-                        self.convert_button.setEnabled(True)
-                        logging.info(f"Selected file via drag & drop: {self.file_path}")
-                        return
-
-    def on_select_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select File", "", "EPUB and TXT files (*.epub *.txt)")
-        if file_path:
-            self.file_path = file_path
-            self.file_label.setText(os.path.basename(self.file_path))
-            self.convert_button.setEnabled(True)
-            logging.info(f"Selected file: {self.file_path}")
-
-    def on_convert_file(self):
-        if self.file_path:
-            output_path = os.path.splitext(self.file_path)[0] + ".pdf"
-            self.convert_button.setEnabled(False)
-            self.select_button.setEnabled(False)
-            logging.info(f"Starting conversion to {output_path}")
-            
-            settings = {
-                'page_numbers': self.page_numbers_check.isChecked(),
-                'toc': self.toc_check.isChecked(),
-                'toc_numbers': self.toc_numbers_check.isChecked(),
-                'toc_start_page': self.toc_start_page_spin.value()
-            }
-            
-            self.worker_thread = QThread()
-            self.worker = ConversionWorker(self.file_path, output_path, settings, self)
-            self.worker.moveToThread(self.worker_thread)
-            self.worker_thread.started.connect(self.worker.run)
-            self.worker.finished.connect(self.on_worker_finished)
-            self.worker.error.connect(self.on_worker_error)
-            self.worker.progress.connect(self.progress_bar.setValue)
-            self.worker_thread.start()
-
-    def convert_txt_to_pdf(self, input_path, output_path, settings, progress_callback=None):
-        if progress_callback: progress_callback(10)
-        logging.info(f"Reading TXT file: {input_path}")
-        with open(input_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        if progress_callback: progress_callback(30)
-        logging.info("Generating HTML from TXT content...")
-        
-        css = ""
-        start_page = settings.get('toc_start_page', 1)
-        if settings.get('page_numbers'):
-            css = f"@page {{ @bottom-center {{ content: counter(page); }} }} body {{ counter-reset: page {start_page - 1}; }}"
-            
-        html_content = f"<html><head><style>{css}</style></head><body><pre>{content}</pre></body></html>"
-        
-        if progress_callback: progress_callback(60)
-        logging.info("Writing PDF...")
-        # Provide a base_url to resolve relative paths for CSS, fonts, etc.
-        input_dir = os.path.dirname(os.path.abspath(input_path))
-        HTML(string=html_content, base_url=input_dir).write_pdf(output_path)
-        if progress_callback: progress_callback(100)
-        logging.info("Finished writing PDF.")
-
-    def convert_epub_to_pdf(self, input_path, output_path, settings, progress_callback=None):
-        if progress_callback: progress_callback(5)
-        logging.info(f"Reading EPUB file: {input_path}")
-        book = epub.read_epub(input_path)
-        
-        # Collect all image items (including those ebooklib might miss if mimetype is unusual like webp)
-        images_by_path = {}
-        for item in book.get_items():
-            if item.get_type() == ebooklib.ITEM_IMAGE or (item.media_type and item.media_type.startswith('image/')):
-                images_by_path[item.get_name().replace('\\', '/')] = item
-                
-        logging.info(f"Found {len(images_by_path)} total images in EPUB.")
-
-        # Determine TOC/Nav items to exclude from main content if we generate our own
-        # But actually, we usually want to keep them unless the user explicitly wants to replace them.
-        # For now, we'll just prepend our generated TOC if requested.
-
-        items_to_process = [book.get_item_with_id(item_id) for item_id, _ in book.spine]
-        spine_hrefs = {item.get_name() for item in items_to_process if item}
-        for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-            if item.get_name() not in spine_hrefs:
-                items_to_process.append(item)
-                
-        # Helper to generate TOC HTML
-        def generate_toc_html(book, page_map=None):
-            toc_html = "<html><head><style>h1 { text-align: center; } ul { list-style-type: none; padding: 0; } li { margin-bottom: 5px; border-bottom: 1px dotted #ccc; } a { text-decoration: none; color: black; display: flex; justify-content: space-between; } .page { font-weight: bold; }</style></head><body><h1>Table of Contents</h1><ul>"
-            
-            def process_toc_item(toc_item, level=0):
-                html_out = ""
-                # ebooklib TOC item can be Link or Tuple or Section
-                if isinstance(toc_item, tuple) or isinstance(toc_item, list):
-                    section = toc_item[0]
-                    children = toc_item[1] if len(toc_item) > 1 else []
-                    
-                    title = section.title if hasattr(section, 'title') else str(section)
-                    href = section.href if hasattr(section, 'href') else ""
-                    
-                    # Clean href (remove anchors)
-                    base_href = href.split('#')[0]
-                    
-                    page_num = ""
-                    if settings.get('toc_numbers') and page_map and base_href in page_map:
-                        page_num = str(page_map[base_href])
-                    
-                    indent = level * 20
-                    html_out += f"<li style='padding-left: {indent}px'><a href='#'><span>{html.escape(title)}</span> <span class='page'>{page_num}</span></a></li>"
-                    
-                    for child in children:
-                        html_out += process_toc_item(child, level + 1)
-                elif isinstance(toc_item, epub.Link):
-                    title = toc_item.title
-                    href = toc_item.href
-                    base_href = href.split('#')[0]
-                    
-                    page_num = ""
-                    if settings.get('toc_numbers') and page_map and base_href in page_map:
-                        page_num = str(page_map[base_href])
-                        
-                    indent = level * 20
-                    html_out += f"<li style='padding-left: {indent}px'><a href='#'><span>{html.escape(title)}</span> <span class='page'>{page_num}</span></a></li>"
-                return html_out
-
-            for item in book.toc:
-                toc_html += process_toc_item(item)
-            
-            toc_html += "</ul></body></html>"
-            return toc_html
-
-        # DRY RUN for TOC size
-        toc_page_count = 0
-        toc_doc = None
-        
-        if settings.get('toc'):
-            logging.info("Calculating TOC size...")
-            dummy_toc_html = generate_toc_html(book)
-            
-            # Apply start page to TOC if page numbers are on
-            toc_css = ""
-            start_page = settings.get('toc_start_page', 1)
-            if settings.get('page_numbers'):
-                 toc_css = f"<style>@page {{ @bottom-center {{ content: counter(page); }} }} body {{ counter-reset: page {start_page - 1}; }}</style>"
-            
-            # Inject CSS into dummy TOC
-            dummy_toc_html = dummy_toc_html.replace("</style>", f"</style>{toc_css}")
-
-            input_dir = os.path.dirname(os.path.abspath(input_path))
-            toc_doc = HTML(string=dummy_toc_html, base_url=input_dir).render()
-            toc_page_count = len(toc_doc.pages)
-            logging.info(f"Estimated TOC length: {toc_page_count} pages")
-
-        total_steps = len(items_to_process) + 2 # items + merge + finalize
-        
-        documents = []
-        
-        # Determine the logical starting page for the content
-        # Content starts after the TOC.
-        # Logical page of content start = Start Page + TOC Length
-        start_page = settings.get('toc_start_page', 1)
-        current_page = toc_page_count + start_page - 1
-        
-        chapter_page_map = {}
-
-        if progress_callback:
-            progress_callback(10)
-
-        def _data_uri_for_src(src_value):
-            if not src_value or src_value.startswith("data:"):
-                return None
-            
-            # Normalize path
-            raw = unquote(src_value).replace("\\", "/")
-            if raw.startswith("file:///"):
-                raw = raw[8:]
-            
-            # 1. Try exact match
-            # Some paths might be absolute if resolved by base_url, we need relative to epub root
-            # But here src_value is what's in the HTML.
-            
-            # If the HTML has src="images/foo.webp", raw is "images/foo.webp".
-            if raw in images_by_path:
-                item = images_by_path[raw]
-                b64 = base64.b64encode(item.get_content()).decode("utf-8")
-                return f"data:{item.media_type};base64,{b64}"
-            
-            # 2. Try match by filename (fallback)
-            # This helps if paths are somehow relative or absolute in a way we didn't expect
-            filename = os.path.basename(raw)
-            for path, item in images_by_path.items():
-                if os.path.basename(path) == filename:
-                    b64 = base64.b64encode(item.get_content()).decode("utf-8")
-                    return f"data:{item.media_type};base64,{b64}"
-            
-            return None
-
-        styles = ""
-        logging.info("Inlining CSS styles...")
-        for item in book.get_items_of_type(ebooklib.ITEM_STYLE):
-            styles += item.get_content().decode('utf-8', 'ignore')
-        # Replace url(...) inside CSS too (covers background images like cover.jpg)
-        def replace_css_url(match):
-            url_value = match.group(1).strip(' "\'')
-            data_uri = _data_uri_for_src(url_value)
-            if data_uri:
-                logging.info(f"Embedding CSS image for '{url_value}'")
-                return f'url("{data_uri}")'
-            return match.group(0)
-        styles = re.sub(r'url\\(([^)]+)\\)', replace_css_url, styles, flags=re.IGNORECASE)
-        
-        # Add page numbering CSS if requested
-        if settings.get('page_numbers'):
-            styles += " @page { @bottom-center { content: counter(page); } } "
-        
-        logging.info(f"Processing {len(items_to_process)} documents chapter by chapter...")
-        for i, doc_item in enumerate(items_to_process):
-            if not doc_item: 
-                continue
-            
-            # Record start page for this chapter
-            chapter_page_map[doc_item.get_name()] = current_page + 1
-
-            # Update progress
-            current_step = i + 1
-            if progress_callback:
-                # Map steps to 10-90% range
-                percent = 10 + int((current_step / len(items_to_process)) * 80)
-                progress_callback(percent)
-
-            logging.info(f"Rendering document: {doc_item.get_name()} (Start Page: {current_page + 1})")
-            content = doc_item.get_content().decode('utf-8', 'ignore')
-
-            def replace_attr(match):
-                attr = match.group(1)
-                quote = match.group(2)
-                src_value = match.group(3)
-                data_uri = _data_uri_for_src(src_value)
-                if data_uri:
-                    logging.info(f"Embedding image for '{src_value}'")
-                    return f'{attr}={quote}{data_uri}{quote}'
-                return match.group(0)
-
-            content = re.sub(
-                r'(\b(?:src|href|xlink:href)\b)\s*=\s*([\'"])([^\'"]+)\2',
-                replace_attr,
-                content,
-                flags=re.IGNORECASE
-            )
-
-            def replace_css_url(match):
-                url_value = match.group(1).strip(' "\'')
-                data_uri = _data_uri_for_src(url_value)
-                if data_uri:
-                    logging.info(f"Embedding CSS image for '{url_value}'")
-                    return f'url("{data_uri}")'
-                return match.group(0)
-
-            content = re.sub(r'url\\(([^)]+)\\)', replace_css_url, content, flags=re.IGNORECASE)
-            
-            # Combine the content and styles for this chapter
-            # Inject counter-reset to ensure page numbers are continuous
-            # Use current_page which tracks the logical page count
-            page_reset_css = f"body {{ counter-reset: page {current_page}; }}" if settings.get('page_numbers') else ""
-            
-            chapter_html = f"<html><head><style>{styles} {page_reset_css}</style></head><body>{content}</body></html>"
-            
-            # Render this chapter to a Document object
-            input_dir = os.path.dirname(os.path.abspath(input_path))
-            doc = HTML(string=chapter_html, base_url=input_dir).render()
-            documents.append(doc)
-            
-            current_page += len(doc.pages)
-            # QApplication.processEvents() # Unsafe in thread
-
-        # Generate Real TOC if requested
-        if settings.get('toc'):
-            logging.info("Generating final TOC with page numbers...")
-            real_toc_html = generate_toc_html(book, chapter_page_map)
-            
-            # Apply start page CSS to final TOC as well
-            start_page = settings.get('toc_start_page', 1)
-            toc_css = ""
-            if settings.get('page_numbers'):
-                 toc_css = f"<style>@page {{ @bottom-center {{ content: counter(page); }} }} body {{ counter-reset: page {start_page - 1}; }}</style>"
-            real_toc_html = real_toc_html.replace("</style>", f"</style>{toc_css}")
-            
-            input_dir = os.path.dirname(os.path.abspath(input_path))
-            real_toc_doc = HTML(string=real_toc_html, base_url=input_dir).render()
-            
-            # Check for size mismatch
-            if len(real_toc_doc.pages) != toc_page_count:
-                logging.warning(f"TOC size changed from {toc_page_count} to {len(real_toc_doc.pages)}. Page numbers might be slightly off.")
-                # Ideally we would re-render everything, but for now just warn.
-                # Or we can insert blank pages to match the count?
-                # No, just accept the slight shift.
-            
-            documents.insert(0, real_toc_doc)
-
-        logging.info("All chapters rendered. Merging into a single PDF...")
-        if progress_callback: progress_callback(95)
-        
-        # Get all pages from all documents and write to the final PDF
-        all_pages = [page for doc in documents for page in doc.pages]
-        logging.info(f"Total pages collected: {len(all_pages)}")
-        logging.info("Writing PDF to disk... (This may take some time for large files)")
-        
-        documents[0].copy(all_pages).write_pdf(output_path)
-        
-        logging.info("Finished writing PDF.")
-        if progress_callback: progress_callback(100)
-
-    def on_worker_finished(self, output_path):
-        self.convert_button.setEnabled(True)
-        self.select_button.setEnabled(True)
-        self.progress_bar.setValue(100)
-        QMessageBox.information(self, "Success", f"Successfully converted to {output_path}")
-        if self.worker_thread:
-            self.worker_thread.quit()
-            self.worker_thread.wait()
-            self.worker_thread = None
-            self.worker = None
-
-    def on_worker_error(self, message):
-        self.convert_button.setEnabled(True)
-        self.select_button.setEnabled(True)
-        QMessageBox.critical(self, "Error", message)
-        if self.worker_thread:
-            self.worker_thread.quit()
-            self.worker_thread.wait()
-            self.worker_thread = None
-            self.worker = None
-
-class ConversionWorker(QObject):
-    finished = Signal(str)
-    error = Signal(str)
+class Worker(QThread):
+    """Runs an engine job off the UI thread; the engine fans out its own thread pools."""
+    log = Signal(str)
     progress = Signal(int)
+    finished_ok = Signal(object)
+    failed = Signal(str)
 
-    def __init__(self, input_path, output_path, settings, parent):
-        super().__init__()
-        self.input_path = input_path
-        self.output_path = output_path
-        self.settings = settings
-        self.parent = parent
+    def __init__(self, job, parent=None):
+        super().__init__(parent)
+        self.job = job
+        self.cancel = threading.Event()
+        self._last = -1
+
+    def _progress(self, fraction):
+        value = int(fraction * 1000)
+        if value != self._last:  # worker threads report far more often than the bar can show
+            self._last = value
+            self.progress.emit(value)
 
     def run(self):
         try:
-            self.progress.emit(0)
-            if self.input_path.endswith(".txt"):
-                self.parent.convert_txt_to_pdf(self.input_path, self.output_path, self.settings, self.progress.emit)
-            elif self.input_path.endswith(".epub"):
-                self.parent.convert_epub_to_pdf(self.input_path, self.output_path, self.settings, self.progress.emit)
-            logging.info(f"Successfully converted to {self.output_path}")
-            self.finished.emit(self.output_path)
+            self.finished_ok.emit(self.job(self.log.emit, self._progress, self.cancel))
         except Exception as e:
-            logging.error(f"An error occurred: {e}", exc_info=True)
-            self.error.emit(f"An error occurred: {e}")
+            self.failed.emit(f"{type(e).__name__}: {e}")
 
+
+class FileConverter(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
+        self.setAcceptDrops(True)
+        self.current_settings = self.load_settings()
+        self.files: list[Path] = []
+        self.worker = None
+
+        screen = QApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            self.resize(min(1080, int(geo.width() * 0.9)), min(940, int(geo.height() * 0.9)))
+        else:
+            self.resize(1000, 860)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 12, 18, 14)
+        root.setSpacing(10)
+
+        title = QLabel("File Converter & Chapter Splitter", objectName="title")
+        title.setAlignment(Qt.AlignCenter)
+        root.addWidget(title)
+
+        # --- source files -------------------------------------------------
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        self.select_button = QPushButton("Select Source Files (TXT, PDF, EPUB)")
+        self.select_button.clicked.connect(self.on_select_files)
+        self.folder_button = QPushButton("Add Folder", objectName="ghost")
+        self.folder_button.clicked.connect(self.on_select_folder)
+        self.clear_button = QPushButton("Clear", objectName="ghost")
+        self.clear_button.clicked.connect(self.clear_files)
+        for b in (self.select_button, self.folder_button, self.clear_button):
+            buttons.addWidget(b)
+        buttons.addStretch()
+        root.addLayout(buttons)
+
+        self.file_label = QLabel(objectName="hint")
+        self.file_label.setAlignment(Qt.AlignCenter)
+        root.addWidget(self.file_label)
+
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.file_list.setFixedHeight(92)
+        self.file_list.setVisible(False)
+        QShortcut(QKeySequence.Delete, self.file_list, activated=self.remove_selected)
+        root.addWidget(self.file_list)
+
+        # --- options ------------------------------------------------------
+        s = self.current_settings
+        panel = QFrame(objectName="panel")
+        grid = QGridLayout(panel)
+        grid.setContentsMargins(16, 12, 16, 12)
+        grid.setHorizontalSpacing(26)
+
+        def column(col, heading):
+            box = QVBoxLayout()
+            box.setSpacing(3)
+            box.addWidget(QLabel(heading, objectName="heading"))
+            grid.addLayout(box, 0, col, Qt.AlignTop)
+            return box
+
+        def radios(box, key, options, default):
+            group = QButtonGroup(self)
+            chosen = s.get(key, default)
+            for value, text, name in options:
+                rb = QRadioButton(text, objectName=name)
+                rb.setProperty("value", value)
+                rb.setChecked(value == chosen)
+                group.addButton(rb)
+                box.addWidget(rb)
+            if group.checkedButton() is None:
+                group.buttons()[0].setChecked(True)
+            group.buttonClicked.connect(lambda _: self.on_option_changed())
+            return group
+
+        box = column(0, "Output Formats:")
+        self.format_checks = {}
+        for key, text in (("txt", "TXT"), ("pdf", "PDF"), ("epub", "EPUB"), ("csv", "CSV (Master)")):
+            cb = QCheckBox(text)
+            cb.setChecked(key in s.get("formats", ["pdf"]))
+            cb.stateChanged.connect(self.on_option_changed)
+            self.format_checks[key] = cb
+            box.addWidget(cb)
+        box.addStretch()
+
+        box = column(1, "File Mode:")
+        self.file_mode = radios(box, "file_mode", [("merged", "One Merged File", ""),
+                                                   ("separate", "Separate Chapters", "")], "merged")
+        box.addStretch()
+
+        box = column(2, "Spacing:")
+        self.spacing = radios(box, "spacing", [("standard", "Standard", ""),
+                                               ("double", "Double Space", ""),
+                                               ("remove", "Remove Blanks", "")], "standard")
+        box.addStretch()
+
+        box = column(3, "Chapter Format Mode:")
+        self.chapter_mode = radios(box, "chapter_mode", [
+            ("auto", "Smart Auto (Paste Example)", "blue"),
+            ("none", "No Splitting (Convert Only)", ""),
+            ("numeric", "00 Prologue / 1 / 01 ...", ""),
+            ("korean", "1화. / 2화. (Korean)", ""),
+            ("hash", "#001. / #002.", ""),
+            ("naver", "Via Naver Series Link", "red")], "auto")
+        box.addStretch()
+
+        box = column(4, "PDF Settings:")
+        self.page_numbers_check = QCheckBox("Add Page Numbers to Footer")
+        self.page_numbers_check.setChecked(s.get("page_numbers", True))
+        self.toc_check = QCheckBox("Generate Table of Contents")
+        self.toc_check.setChecked(s.get("toc", False))
+        self.toc_numbers_check = QCheckBox("Add Page Numbers to TOC")
+        self.toc_numbers_check.setChecked(s.get("toc_numbers", True))
+        self.keep_layout_check = QCheckBox("Keep EPUB Images && Styling")
+        self.keep_layout_check.setChecked(s.get("keep_layout", True))
+        self.keep_layout_check.setToolTip(
+            "EPUB → merged PDF is rendered with WeasyPrint so images and the book's CSS survive.\n"
+            "Needs the GTK runtime (MSYS2); falls back to a text PDF when unavailable.")
+        for cb in (self.page_numbers_check, self.toc_check, self.toc_numbers_check,
+                   self.keep_layout_check):
+            cb.stateChanged.connect(self.on_option_changed)
+            box.addWidget(cb)
+        start_row = QHBoxLayout()
+        self.toc_start_label = QLabel("Start Page Number:")
+        self.toc_start_page_spin = NoScrollSpinBox()
+        self.toc_start_page_spin.setFixedWidth(80)
+        self.toc_start_page_spin.setRange(1, 9999)
+        self.toc_start_page_spin.setValue(s.get("toc_start_page", 1))
+        self.toc_start_page_spin.valueChanged.connect(self.on_option_changed)
+        start_row.addWidget(self.toc_start_label)
+        start_row.addWidget(self.toc_start_page_spin)
+        start_row.addStretch()
+        box.addLayout(start_row)
+        box.addStretch()
+        grid.setColumnStretch(5, 1)
+        root.addWidget(panel)
+
+        # --- log + example panel -----------------------------------------
+        middle = QHBoxLayout()
+        middle.setSpacing(12)
+        log_box = QVBoxLayout()
+        log_box.setSpacing(6)
+        self.log_viewer = QTextEdit()
+        self.log_viewer.setReadOnly(True)
+        self.log_viewer.setPlainText(f"Smart Engine v{APP_VERSION} Ready.\n"
+                                     "Drop TXT / PDF / EPUB files or folders anywhere on this window.")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setTextVisible(False)
+        log_box.addWidget(self.log_viewer)
+        log_box.addWidget(self.progress_bar)
+        middle.addLayout(log_box, 1)
+
+        side = QFrame(objectName="side")
+        side.setFixedWidth(290)
+        side_layout = QVBoxLayout(side)
+        self.side_stack = QStackedWidget()
+        side_layout.addWidget(self.side_stack)
+
+        def side_page(label, label_name, placeholder, hint, key):
+            page = QWidget()
+            lay = QVBoxLayout(page)
+            lay.setSpacing(10)
+            head = QLabel(label, objectName=label_name)
+            head.setAlignment(Qt.AlignCenter)
+            entry = QLineEdit(s.get(key, ""))
+            entry.setPlaceholderText(placeholder)
+            entry.editingFinished.connect(self.save_settings)
+            note = QLabel(hint, objectName="hint")
+            note.setAlignment(Qt.AlignCenter)
+            note.setWordWrap(True)
+            lay.addWidget(head)
+            lay.addWidget(entry)
+            lay.addWidget(note)
+            lay.addStretch()
+            self.side_stack.addWidget(page)
+            return entry
+
+        self.example_entry = side_page(
+            "Paste an Example Here:", "accent", "e.g. 2화. 내가 허락했어",
+            "Just paste exactly how a chapter looks in your file.\n\n"
+            "Leave it empty to auto-detect common styles (Chapter 1, 1화, #001, 第一章 …).", "example")
+        self.naver_entry = side_page(
+            "Naver Series URL:", "naver", "https://series.naver.com/novel/detail.series?productNo=…",
+            "Fetches the official episode list and splits on those titles. "
+            "Irregular tags such as (삽화) or [수정] are cleaned automatically.", "naver_url")
+        info = QWidget()
+        info_layout = QVBoxLayout(info)
+        self.side_info = QLabel(objectName="hint")
+        self.side_info.setAlignment(Qt.AlignCenter)
+        self.side_info.setWordWrap(True)
+        info_layout.addWidget(self.side_info)
+        info_layout.addStretch()
+        self.side_stack.addWidget(info)
+        middle.addWidget(side)
+        root.addLayout(middle, 1)
+
+        # --- prefix / threads --------------------------------------------
+        prefix_row = QHBoxLayout()
+        prefix_row.addStretch()
+        self.prefix_check = QCheckBox("Format Chapter Prefix/Suffix:", objectName="accent")
+        self.prefix_check.setChecked(s.get("use_prefix", False))
+        self.prefix_check.stateChanged.connect(self.on_option_changed)
+        self.prefix_entry = QLineEdit(s.get("prefix", "Ch.{n}"))
+        self.prefix_entry.setFixedWidth(90)
+        self.prefix_entry.editingFinished.connect(self.save_settings)
+        prefix_row.addWidget(self.prefix_check)
+        prefix_row.addWidget(self.prefix_entry)
+        prefix_row.addWidget(QLabel("(Use {n} for number, e.g. Ch.{n} or {n}화)", objectName="hint"))
+        prefix_row.addSpacing(28)
+        prefix_row.addWidget(QLabel("Parallel threads:"))
+        self.threads_spin = NoScrollSpinBox()
+        self.threads_spin.setRange(1, 64)
+        self.threads_spin.setFixedWidth(70)
+        self.threads_spin.setValue(s.get("threads", engine.DEFAULT_WORKERS))
+        self.threads_spin.valueChanged.connect(self.on_option_changed)
+        prefix_row.addWidget(self.threads_spin)
+        prefix_row.addStretch()
+        root.addLayout(prefix_row)
+
+        # --- actions ------------------------------------------------------
+        go_row = QHBoxLayout()
+        go_row.addStretch()
+        self.convert_button = QPushButton("CONVERT / PROCESS", objectName="go")
+        self.convert_button.clicked.connect(self.on_convert)
+        self.cancel_button = QPushButton("Cancel", objectName="stop")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.on_cancel)
+        go_row.addWidget(self.convert_button)
+        go_row.addWidget(self.cancel_button)
+        go_row.addStretch()
+        root.addLayout(go_row)
+
+        merge_row = QHBoxLayout()
+        merge_row.addStretch()
+        self.merge_button = QPushButton("MERGE FILES (TXT/PDF/EPUB) TO 1 FILE (TXT/PDF/EPUB)",
+                                        objectName="merge")
+        self.merge_button.clicked.connect(self.on_merge)
+        merge_row.addWidget(self.merge_button)
+        merge_row.addStretch()
+        root.addLayout(merge_row)
+
+        self.refresh_files()
+        self.update_option_states()
+
+    # ---- settings ----------------------------------------------------------
+
+    def load_settings(self):
+        try:
+            if SETTINGS_FILE.exists():
+                return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    def save_settings(self):
+        settings = {
+            "formats": [k for k, cb in self.format_checks.items() if cb.isChecked()],
+            "file_mode": self._value(self.file_mode),
+            "spacing": self._value(self.spacing),
+            "chapter_mode": self._value(self.chapter_mode),
+            "example": self.example_entry.text(),
+            "naver_url": self.naver_entry.text(),
+            "use_prefix": self.prefix_check.isChecked(),
+            "prefix": self.prefix_entry.text(),
+            "threads": self.threads_spin.value(),
+            "page_numbers": self.page_numbers_check.isChecked(),
+            "toc": self.toc_check.isChecked(),
+            "toc_numbers": self.toc_numbers_check.isChecked(),
+            "toc_start_page": self.toc_start_page_spin.value(),
+            "keep_layout": self.keep_layout_check.isChecked(),
+        }
+        try:
+            SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=1),
+                                     encoding="utf-8")
+        except OSError as e:
+            self.log(f"Could not save settings: {e}")
+
+    @staticmethod
+    def _value(group):
+        return group.checkedButton().property("value")
+
+    def on_option_changed(self, *_):
+        self.update_option_states()
+        self.save_settings()
+
+    def update_option_states(self):
+        mode = self._value(self.chapter_mode)
+        if mode == "auto":
+            self.side_stack.setCurrentIndex(0)
+        elif mode == "naver":
+            self.side_stack.setCurrentIndex(1)
+        else:
+            self.side_info.setText({
+                "none": "Files are converted as they are.\n\nEPUBs keep their own chapters; "
+                        "TXT and PDF become a single section.",
+                "numeric": "Splits on lines that are a bare number, optionally followed by a "
+                           "title:\n\n00 Prologue\n1\n01 Title\n\nOnly numbers that rise in "
+                           "sequence count, so stray numbers in the text are ignored.",
+                "korean": "Splits on lines such as:\n\n1화\n2화. 제목\n제3화",
+                "hash": "Splits on lines such as:\n\n#001.\n#002. Title",
+            }[mode])
+            self.side_stack.setCurrentIndex(2)
+        pdf = self.format_checks["pdf"].isChecked()
+        toc = pdf and self.toc_check.isChecked()
+        self.page_numbers_check.setEnabled(pdf)
+        self.toc_check.setEnabled(pdf)
+        self.keep_layout_check.setEnabled(pdf)
+        self.toc_numbers_check.setEnabled(toc)
+        self.toc_start_label.setEnabled(pdf)
+        self.toc_start_page_spin.setEnabled(pdf)
+        self.prefix_entry.setEnabled(self.prefix_check.isChecked())
+
+    def build_settings(self):
+        return engine.Settings(
+            formats={k for k, cb in self.format_checks.items() if cb.isChecked()},
+            merged=self._value(self.file_mode) == "merged",
+            spacing=self._value(self.spacing),
+            mode=self._value(self.chapter_mode),
+            example=self.example_entry.text(),
+            naver_url=self.naver_entry.text().strip(),
+            template=(self.prefix_entry.text().strip() or None) if self.prefix_check.isChecked() else None,
+            workers=self.threads_spin.value(),
+            page_numbers=self.page_numbers_check.isChecked(),
+            toc=self.toc_check.isChecked(),
+            toc_numbers=self.toc_numbers_check.isChecked(),
+            start_page=self.toc_start_page_spin.value(),
+            keep_layout=self.keep_layout_check.isChecked(),
+        )
+
+    # ---- file selection ----------------------------------------------------
+
+    def add_paths(self, paths):
+        known = {str(p.resolve()).lower() for p in self.files}
+        added = 0
+        for f in engine.collect_files(paths):
+            key = str(f.resolve()).lower()
+            if key not in known:
+                known.add(key)
+                self.files.append(f)
+                added += 1
+        if added:
+            self.files.sort(key=engine.natural_key)
+            self.refresh_files()
+            self.log(f"Added {added} file(s); {len(self.files)} queued.")
+        elif paths:
+            self.log("No new TXT / PDF / EPUB files found in the selection.")
+
+    def refresh_files(self):
+        self.file_list.clear()
+        self.file_list.addItems([f"{p.name}     —  {p.parent}" for p in self.files])
+        self.file_list.setVisible(bool(self.files))
+        if not self.files:
+            self.file_label.setText("No file selected — click the button or drag & drop files / folders here")
+        elif len(self.files) == 1:
+            self.file_label.setText(f"Selected: {self.files[0].name}")
+        else:
+            self.file_label.setText(f"{len(self.files)} files selected (batch)   ·   "
+                                    "Delete removes the highlighted ones")
+
+    def on_select_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Select Source Files", "", FILE_FILTER)
+        if paths:
+            self.add_paths(paths)
+
+    def on_select_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder (all TXT / PDF / EPUB inside are added)")
+        if folder:
+            self.add_paths([folder])
+
+    def clear_files(self):
+        self.files = []
+        self.refresh_files()
+
+    def remove_selected(self):
+        rows = {i.row() for i in self.file_list.selectedIndexes()}
+        if rows:
+            self.files = [f for i, f in enumerate(self.files) if i not in rows]
+            self.refresh_files()
+
+    def dragEnterEvent(self, event):
+        if self.worker is None and any(u.isLocalFile() for u in event.mimeData().urls()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        if paths:
+            event.acceptProposedAction()
+            self.add_paths(paths)
+
+    # ---- running jobs ------------------------------------------------------
+
+    def log(self, message):
+        self.log_viewer.append(f"> {message}")
+
+    def set_busy(self, busy):
+        for w in (self.select_button, self.folder_button, self.clear_button,
+                  self.convert_button, self.merge_button):
+            w.setEnabled(not busy)
+        self.cancel_button.setEnabled(busy)
+        self.convert_button.setText("PROCESSING…" if busy else "CONVERT / PROCESS")
+
+    def start(self, job, on_done):
+        self.progress_bar.setValue(0)
+        self.set_busy(True)
+        self.worker = Worker(job, self)
+        self.worker.log.connect(self.log)
+        self.worker.progress.connect(self.progress_bar.setValue)
+        self.worker.finished_ok.connect(on_done)
+        self.worker.failed.connect(self.on_failed)
+        self.worker.finished.connect(self.on_thread_finished)
+        self.worker.start()
+
+    def on_thread_finished(self):
+        self.worker.deleteLater()
+        self.worker = None
+        self.set_busy(False)
+
+    def on_failed(self, message):
+        self.log(f"ERROR: {message}")
+        QMessageBox.critical(self, "Error", f"Operation failed:\n{message}")
+
+    def on_cancel(self):
+        if self.worker:
+            self.worker.cancel.set()
+            self.cancel_button.setEnabled(False)
+            self.log("Cancelling… (files already being written will finish)")
+
+    def on_convert(self):
+        self.save_settings()
+        settings = self.build_settings()
+        if not self.files:
+            QMessageBox.warning(self, "No files", "Select or drop at least one TXT, PDF or EPUB file.")
+            return
+        if not settings.formats:
+            QMessageBox.warning(self, "No output format", "Tick at least one output format.")
+            return
+        if settings.mode == "naver" and "productNo=" not in settings.naver_url:
+            QMessageBox.warning(self, "Naver Series link",
+                                "Paste a Naver Series link that contains productNo=… first.")
+            return
+        files = list(self.files)
+        self.start(lambda log, progress, cancel: engine.process_batch(files, settings, log,
+                                                                      progress, cancel),
+                   self.on_convert_done)
+
+    def on_convert_done(self, results):
+        ok = [r for r in results if "error" not in r]
+        failed = [r for r in results if "error" in r and r["error"] != "cancelled"]
+        cancelled = len(results) - len(ok) - len(failed)
+        outputs = sum(r["outputs"] for r in ok)
+        self.progress_bar.setValue(1000)
+        summary = f"{len(ok)} file(s) processed, {outputs} output file(s) written."
+        if failed:
+            summary += f"\n{len(failed)} file(s) failed — see the log."
+        if cancelled:
+            summary += f"\n{cancelled} file(s) cancelled."
+        self.log(summary.replace("\n", "  "))
+        box = QMessageBox(QMessageBox.Warning if failed else QMessageBox.Information,
+                          "Done", summary, QMessageBox.Ok, self)
+        open_button = box.addButton("Open Output Folder", QMessageBox.ActionRole) if ok else None
+        box.exec()
+        if open_button is not None and box.clickedButton() is open_button:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(ok[0]["out_dir"])))
+
+    def on_merge(self):
+        self.save_settings()
+        files = list(self.files)
+        if len(files) < 2:
+            paths, _ = QFileDialog.getOpenFileNames(self, "Select the files to merge (2 or more)",
+                                                    "", FILE_FILTER)
+            files = sorted(engine.collect_files(paths), key=engine.natural_key)
+            if len(files) < 2:
+                if paths:
+                    QMessageBox.warning(self, "Merge", "Pick at least two files to merge.")
+                return
+        default = files[0].parent / f"{files[0].parent.name or 'Merged'}_Merged.txt"
+        out, _ = QFileDialog.getSaveFileName(
+            self, f"Merge {len(files)} files into…", str(default),
+            "Text file (*.txt);;PDF document (*.pdf);;EPUB e-book (*.epub)")
+        if not out:
+            return
+        if Path(out).suffix.lower() not in (".txt", ".pdf", ".epub"):
+            out += ".txt"
+        settings = self.build_settings()
+        self.start(lambda log, progress, cancel: (engine.merge_files(files, Path(out), settings,
+                                                                     log, progress), out),
+                   self.on_merge_done)
+
+    def on_merge_done(self, result):
+        count, out = result
+        QMessageBox.information(self, "Merged", f"Merged {count} sections into:\n{out}")
+
+    def closeEvent(self, event):
+        if self.worker:
+            self.worker.cancel.set()
+            self.worker.wait(5000)
+        self.save_settings()
+        event.accept()
+
+
+def run_cli(argv):
+    """Headless batch mode: converter --cli [options] files/folders…"""
+    import argparse
+    parser = argparse.ArgumentParser(prog="converter --cli")
+    parser.add_argument("paths", nargs="+", help="TXT / PDF / EPUB files or folders")
+    parser.add_argument("--formats", default="pdf", help="comma list of txt,pdf,epub,csv")
+    parser.add_argument("--separate", action="store_true", help="one file per chapter")
+    parser.add_argument("--spacing", default="standard", choices=["standard", "double", "remove"])
+    parser.add_argument("--mode", default="auto", choices=["auto", "none", "numeric", "korean", "hash"])
+    parser.add_argument("--example", default="", help="example chapter heading for auto mode")
+    parser.add_argument("--prefix", default=None, help="chapter title template, e.g. Ch.{n}")
+    parser.add_argument("--toc", action="store_true", help="add a table of contents to PDFs")
+    parser.add_argument("--keep-layout", action="store_true",
+                        help="EPUB → PDF through WeasyPrint (images + CSS)")
+    parser.add_argument("--threads", type=int, default=engine.DEFAULT_WORKERS)
+    parser.add_argument("--log", default=None, help="also write the log to this file")
+    args = parser.parse_args(argv)
+    lines = []
+
+    def log(message):
+        lines.append(message)
+        try:
+            print(message, flush=True)
+        except (OSError, UnicodeError):
+            pass
+
+    settings = engine.Settings(
+        formats=set(args.formats.lower().split(",")), merged=not args.separate,
+        spacing=args.spacing, mode=args.mode, example=args.example, template=args.prefix,
+        toc=args.toc, keep_layout=args.keep_layout, workers=args.threads)
+    results = engine.process_batch(engine.collect_files(args.paths), settings, log, lambda f: None)
+    if args.log:
+        Path(args.log).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return 1 if any("error" in r for r in results) else 0
 
 
 if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == "--cli":
+        sys.exit(run_cli(sys.argv[2:]))
     app = QApplication(sys.argv)
+    apply_theme(app)
     window = FileConverter()
     window.show()
     sys.exit(app.exec())

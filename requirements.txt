@@ -1,3 +1,9 @@
-weasyprint
-ebooklib
 PySide6
+pypdfium2
+reportlab
+beautifulsoup4
+lxml
+chardet
+requests
+ebooklib
+weasyprint
