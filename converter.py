@@ -27,6 +27,7 @@ APP_NAME = "File Converter"
 APP_VERSION = "2.1"
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 SETTINGS_FILE = APP_DIR / "config.json"
+SETTINGS_VERSION = 2
 FILE_FILTER = "Supported files (*.txt *.pdf *.epub);;All files (*)"
 
 STYLE = """
@@ -400,13 +401,19 @@ class FileConverter(QWidget):
     def load_settings(self):
         try:
             if SETTINGS_FILE.exists():
-                return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+                settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+                if settings.get("settings_version", 1) < SETTINGS_VERSION:
+                    # Early builds saved their old default of 16 threads; use the
+                    # current default instead of treating that as a user choice.
+                    settings.pop("threads", None)
+                return settings
         except Exception:
             pass
         return {}
 
     def save_settings(self):
         settings = {
+            "settings_version": SETTINGS_VERSION,
             "formats": [k for k, cb in self.format_checks.items() if cb.isChecked()],
             "file_mode": self._value(self.file_mode),
             "spacing": self._value(self.spacing),
