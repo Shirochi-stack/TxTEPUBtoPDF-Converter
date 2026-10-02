@@ -63,6 +63,6 @@ Headless batch mode: `python converter.py --cli --formats txt,epub book.pdf fold
 
 ## Build
 
-`build.bat` produces `dist\converter.exe` from `converter.spec`.
+`build.bat` produces `dist\TxTEPUBtoPDF-Converter.v<version>.exe` (e.g. `TxTEPUBtoPDF-Converter.v2.1.exe`) from `converter.spec`; the version comes from `VERSION` in the spec.
 
 The layout-preserving EPUB → PDF option needs the GTK runtime (MSYS2 `mingw64`); without it the app falls back to its built-in text PDF writer.

@@ -11,6 +11,8 @@ PUBLISHER = 'shirochi-stack'
 APP_NAME = 'File Converter'
 VERSION = (2, 1, 0, 0)
 VERSION_STR = '.'.join(map(str, VERSION))
+# Release file name, e.g. TxTEPUBtoPDF-Converter.v2.1.exe
+EXE_NAME = 'TxTEPUBtoPDF-Converter.v%d.%d' % VERSION[:2]
 
 # --- GTK/MSYS2 DLLs for WeasyPrint (layout-preserving EPUB -> PDF) ---
 gtk_folder = os.environ.get('GTK_FOLDER', '')
@@ -45,9 +47,9 @@ version_info = VSVersionInfo(
             StringStruct('CompanyName', PUBLISHER),
             StringStruct('FileDescription', APP_NAME + ' - TXT / PDF / EPUB converter and chapter splitter'),
             StringStruct('FileVersion', VERSION_STR),
-            StringStruct('InternalName', 'FileConverter'),
+            StringStruct('InternalName', EXE_NAME),
             StringStruct('LegalCopyright', 'Copyright (c) ' + PUBLISHER),
-            StringStruct('OriginalFilename', 'FileConverter.exe'),
+            StringStruct('OriginalFilename', EXE_NAME + '.exe'),
             StringStruct('ProductName', APP_NAME),
             StringStruct('ProductVersion', VERSION_STR),
         ])]),
@@ -77,7 +79,7 @@ exe = EXE(pyz,
           a.zipfiles,
           a.datas,
           [],
-          name='FileConverter',
+          name=EXE_NAME,
           debug=False,
           bootloader_ignore_signals=False,
           strip=False,
