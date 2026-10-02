@@ -9,7 +9,7 @@ block_cipher = None
 
 PUBLISHER = 'shirochi-stack'
 APP_NAME = 'File Converter'
-VERSION = (2, 0, 0, 0)
+VERSION = (2, 1, 0, 0)
 VERSION_STR = '.'.join(map(str, VERSION))
 
 # --- GTK/MSYS2 DLLs for WeasyPrint (layout-preserving EPUB -> PDF) ---

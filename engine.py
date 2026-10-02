@@ -397,8 +397,10 @@ def _best_chain(nums: list[int]) -> set[int]:
     return keep
 
 
-def find_headings(lines: list[str], rule) -> list[tuple[int, int | None, str, str]]:
-    """Return [(line_index, number, subtitle, heading_text)]."""
+def find_headings(lines: list[str], rule) -> list[tuple]:
+    """Return [(line_index, number, subtitle, heading_text, body_start_line)]."""
+    if hasattr(rule, "find"):
+        return rule.find(lines)
     hits = []
     for i, raw in enumerate(lines):
         s = raw.strip()
@@ -406,9 +408,9 @@ def find_headings(lines: list[str], rule) -> list[tuple[int, int | None, str, st
             continue
         r = rule.match(s)
         if r:
-            hits.append((i, r[0], r[1], r[2] if len(r) > 2 else s))
+            hits.append((i, r[0], r[1], r[2] if len(r) > 2 else s, i + 1))
         elif _SPECIAL.match(s):
-            hits.append((i, None, "", s))
+            hits.append((i, None, "", s, i + 1))
     if rule.sequential:
         numbered = [k for k, h in enumerate(hits) if h[1] is not None]
         keep = {numbered[k] for k in _best_chain([hits[k][1] for k in numbered])}
@@ -449,6 +451,224 @@ def detect_rule(lines: list[str]):
     return None
 
 
+# --------------------------------------------------------------------------
+# Smart detection: several heading styles in one book
+# --------------------------------------------------------------------------
+
+_BAD_TITLE_END = re.compile(r"[.!?…。！？,;:~\"'“”‘’」』]$")
+_BAD_TITLE_START = re.compile(r"^[\-–—\[\(<>▶▼■□●○◆◇★☆※*/=~ㄴ#]")
+
+
+def _block_mask(lines: list[str]) -> list[bool]:
+    """Mark lines inside inserted blocks such as //* … *// (comments, notices)."""
+    mask = [False] * len(lines)
+    opener = None
+    for i, raw in enumerate(lines):
+        s = raw.strip()
+        if re.fullmatch(r"/+\*+", s):
+            opener = i
+        elif re.fullmatch(r"\*+/+", s) and opener is not None and i - opener <= 400:
+            for k in range(opener, i + 1):
+                mask[k] = True
+            opener = None
+    return mask
+
+
+def _titleish(lines: list[str], i: int, max_len: int = 40) -> bool:
+    """A short stand-alone line that reads like a title rather than prose."""
+    s = lines[i].strip()
+    if not s or len(s) > max_len:
+        return False
+    if (i > 0 and lines[i - 1].strip()) or (i + 1 < len(lines) and lines[i + 1].strip()):
+        return False
+    if _BAD_TITLE_START.match(s) or re.search(r"[\"“”「」『』]", s):
+        return False
+    if _BAD_TITLE_END.search(s):
+        # All-caps English titles may end in punctuation ("LET'S RIDE!", "A.K.A.");
+        # anything else ending in punctuation is prose or a sound effect.
+        if not (s[-1] in "!?." and re.search(r"[A-Z]{2}|[A-Z]\.[A-Z]", s)
+                and not re.search(r"[a-z가-힣]", s)):
+            return False
+    # Two letters minimum, but one Hangul/CJK syllable is already a word ("끝 2").
+    return len(re.findall(r"[^\W\d_]", s)) >= 2 or bool(re.search(r"[가-힣一-鿿]", s))
+
+
+def _next_nonblank(lines: list[str], i: int, limit: int = 3) -> int | None:
+    for j in range(i + 1, min(len(lines), i + 1 + limit)):
+        if lines[j].strip():
+            return j
+    return None
+
+
+def _prefixed_hits(lines: list[str], rule, taken) -> list[tuple]:
+    """Headings with a recurring prefix, e.g. "<work title> 127화"."""
+    found: dict[str, list] = {}
+    for i, raw in enumerate(lines):
+        s = raw.strip()
+        if not s or len(s) > 60 or i in taken:
+            continue
+        if (i > 0 and lines[i - 1].strip()) or (i + 1 < len(lines) and lines[i + 1].strip()):
+            continue  # headings stand on their own line
+        for m in re.finditer(r"\s+", s[:32]):
+            if re.search(r"\d|[.!?,]$", s[:m.start()]):
+                break  # a prefix with numbers or punctuation is prose, not a work title
+            r = rule.match(s[m.end():])
+            if r:
+                found.setdefault(s[:m.start()], []).append(
+                    (i, r[0], r[1], r[2] if len(r) > 2 else s, i + 1))
+                break
+    return [h for group in found.values() if len(group) >= 3 for h in group]
+
+
+def _series_titles(lines: list[str], candidates: list[int]) -> list[int]:
+    """Title lines that repeat as a numbered series: "Arc", "Arc 2", "Arc 3" …"""
+    groups: dict[str, list] = {}
+    for i in candidates:
+        s = lines[i].strip()
+        m = re.match(r"^(.*?\S)\s*(\d{1,3})$", s)
+        if m and re.search(r"[^\W\d_]", m.group(1)):
+            key, num = m.group(1), int(m.group(2))
+        else:
+            key, num = s, 1
+        groups.setdefault(re.sub(r"\s+", "", key).lower(), []).append((i, num))
+    out = []
+    for occ in groups.values():
+        nums = [n for _, n in occ]
+        steps = [b - a for a, b in zip(nums, nums[1:])]
+        if len(occ) >= 2 and nums[0] in (1, 2) and all(1 <= d <= 2 for d in steps) \
+                and sum(d == 1 for d in steps) >= 0.7 * len(steps):
+            out += [i for i, _ in occ]
+    return out
+
+
+class SmartRule:
+    """Combines heading patterns and fills in chapters they miss.
+
+    1. Base patterns (pasted examples, or the best auto-detected style).
+    2. The same patterns behind a recurring prefix ("<work title> 127화").
+    3. Two-line headings: a number-only heading followed by its title line.
+    4. Inside stretches the patterns don't cover (too long, numbering jumps,
+       or past the last numbered heading): numbered title series
+       ("Arc", "Arc 2", …) and then single title lines at chapter-sized spacing.
+    """
+
+    numtype = "int"
+    sequential = False
+
+    def __init__(self, base: list | None = None):
+        self.base = [r for r in (base or []) if r]
+        self.name = "smart detection"
+
+    def find(self, lines: list[str]) -> list[tuple]:
+        base = self.base or [r for r in [detect_rule(lines)] if r]
+        hits: dict[int, tuple] = {}
+        for rule in base:
+            for h in find_headings(lines, rule):
+                hits.setdefault(h[0], h)
+        for rule in base:
+            if not rule.sequential:
+                for h in _prefixed_hits(lines, rule, hits):
+                    hits.setdefault(h[0], h)
+        strong = len(hits)
+
+        mask = _block_mask(lines)
+        titleish = lambda i: _titleish(lines, i) and not mask[i]
+        consumed = set()
+        for i in sorted(hits):
+            h = hits[i]
+            if h[1] is None or h[2]:
+                continue
+            j = _next_nonblank(lines, i)
+            if j is not None and j not in hits and titleish(j):
+                sub = lines[j].strip()
+                hits[i] = (i, h[1], sub, f"{h[3]} {sub}", j + 1)
+                consumed.add(j)
+
+        cum = [0]
+        for raw in lines:
+            cum.append(cum[-1] + len(raw.strip()))
+        ordered = sorted(hits.values())
+        sizes = sorted(cum[b[0]] - cum[a[0]] for a, b in zip(ordered, ordered[1:]))
+        median = sizes[len(sizes) // 2] if len(sizes) >= 3 else None
+
+        # Stretches the patterns did not explain.
+        bounds = [h[0] for h in ordered]
+        zones = []  # (start, end, missing count or None)
+        if not ordered:
+            zones.append((0, len(lines), None))
+        else:
+            for a, b in zip(ordered, ordered[1:]):
+                size = cum[b[0]] - cum[a[0]]
+                if a[1] is not None and b[1] is not None and b[1] - a[1] > 1:
+                    zones.append((a[4], b[0], b[1] - a[1] - 1))
+                elif median and size > 2 * median and (a[1] is None or b[1] is None):
+                    # Consecutive numbers prove nothing is missing; only unnumbered
+                    # stretches can hide chapters.
+                    zones.append((a[4], b[0], None))
+            last = ordered[-1]
+            if median is None or cum[len(lines)] - cum[last[0]] > 2 * median:
+                zones.append((last[4], len(lines), None))
+
+        added = []
+        for lo, hi, missing in zones:
+            cands = [i for i in range(lo + 2, hi) if i not in consumed and titleish(i)]
+            series = [] if missing else _series_titles(lines, cands)
+            added += series
+            if median is None:
+                continue
+            # Chapter-sized gaps that are still too long get split at title lines.
+            cuts = sorted([lo] + series + [hi])
+            for a, b in zip(cuts, cuts[1:]):
+                budget = missing if missing else None
+                added += self._split(cum, median, a, b, [c for c in cands if a + 2 < c < b], budget)
+        for i in added:
+            s = lines[i].strip()
+            hits.setdefault(i, (i, None, s, s, i + 1))
+
+        ordered = sorted(hits.values())
+        self.name = (" + ".join(r.name for r in base) or "title lines") + \
+            (f" + {len(ordered) - strong} recovered title headings" if len(ordered) > strong else "")
+        # Number every chapter: explicit numbers win, the rest continue the count.
+        out, counter = [], 0
+        for i, number, subtitle, heading, body in ordered:
+            if number is not None:
+                counter = number
+            elif not _SPECIAL.match(heading):
+                counter += 1
+                number = counter
+                if not re.search(r"\w", heading):  # bare separators such as "***"
+                    heading = subtitle = f"Chapter {counter}"
+            out.append((i, number, subtitle, heading, body))
+        return out
+
+    @classmethod
+    def _split(cls, cum, median, lo, hi, cands, budget):
+        """Cut an over-long stretch at title lines so pieces come out chapter-sized.
+
+        ``budget`` is the number of cuts when numbering says how many chapters are
+        missing; otherwise cut while the stretch is clearly longer than a chapter.
+        """
+        size = cum[hi] - cum[lo]
+        if not cands or budget == 0 or (budget is None and size <= 1.6 * median):
+            return []
+        floor = 0.35 * median if budget else 0.6 * median
+        options = [c for c in cands if lo < c < hi
+                   and cum[c] - cum[lo] >= floor and cum[hi] - cum[c] >= floor]
+        if not options:
+            return []
+
+        def off(x):  # how far a piece is from a whole number of chapters
+            return abs(x / median - max(1, round(x / median)))
+
+        c = min(options, key=lambda c: off(cum[c] - cum[lo]) + off(cum[hi] - cum[c]))
+        if budget:
+            left = min(budget - 1, max(0, round((cum[c] - cum[lo]) / median) - 1))
+            return (cls._split(cum, median, lo, c, cands, left) + [c] +
+                    cls._split(cum, median, c, hi, cands, budget - 1 - left))
+        return (cls._split(cum, median, lo, c, cands, None) + [c] +
+                cls._split(cum, median, c, hi, cands, None))
+
+
 def split_text(text: str, rule) -> list[Chapter]:
     lines = text.split("\n")
     hits = find_headings(lines, rule) if rule else []
@@ -458,13 +678,13 @@ def split_text(text: str, rule) -> list[Chapter]:
     front = lines[:hits[0][0]]
     if any(ln.strip() for ln in front):
         chapters.append(Chapter(0, None, "Front Matter", "", front))
-    for seq, (start, number, subtitle, heading) in enumerate(hits, 1):
+    for seq, (start, number, subtitle, heading, body_start) in enumerate(hits, 1):
         end = hits[seq][0] if seq < len(hits) else len(lines)
         if rule.numtype is None and not _SPECIAL.match(heading):
             number = seq
             if not re.search(r"\w", heading):  # bare separators such as "***"
                 heading = f"Chapter {seq}"
-        chapters.append(Chapter(seq, number, heading, subtitle, lines[start + 1:end]))
+        chapters.append(Chapter(seq, number, heading, subtitle, lines[body_start:end]))
     return chapters
 
 
@@ -835,12 +1055,9 @@ def collect_files(paths) -> list[Path]:
 def _resolve_rule(settings: Settings, lines: list[str], naver_rule, tag: str, log: LogFn):
     if settings.mode == "none":
         return None
-    if settings.mode == "numeric":
-        return RULE_NUMERIC
-    if settings.mode == "korean":
-        return RULE_KOREAN
-    if settings.mode == "hash":
-        return RULE_HASH
+    presets = {"numeric": RULE_NUMERIC, "korean": RULE_KOREAN, "hash": RULE_HASH}
+    if settings.mode in presets:
+        return SmartRule([presets[settings.mode]])
     if settings.mode == "naver" and naver_rule:
         found = len(find_headings(lines, naver_rule))
         if found >= 2:
@@ -848,9 +1065,10 @@ def _resolve_rule(settings: Settings, lines: list[str], naver_rule, tag: str, lo
                 log(f"{tag} Matched {found} of {naver_rule.count} Naver episodes in this file.")
             return naver_rule
         log(f"{tag} Naver titles not found in the text; falling back to auto-detect.")
-    elif settings.mode == "auto" and settings.example.strip():
-        return rule_from_example(settings.example)
-    return detect_rule(lines)
+    elif settings.mode == "auto":
+        # One example per line; each becomes its own pattern.
+        return SmartRule([rule_from_example(ex) for ex in settings.example.splitlines() if ex.strip()])
+    return SmartRule()
 
 
 def _source_chapters(path: Path, text: str) -> list[Chapter]:
@@ -893,10 +1111,15 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
     if chapters:
         log(f"{tag} {len(real)} chapters found using {rule.name}.")
         nums = [c.number for c in real if c.number is not None]
-        gaps = [f"{a}→{b}" for a, b in zip(nums, nums[1:]) if b != a + 1]
-        if gaps:
-            more = "…" if len(gaps) > 8 else ""
-            log(f"{tag} Note: numbering jumps at {', '.join(gaps[:8])}{more}")
+        missing = [str(n) for a, b in zip(nums, nums[1:]) if 1 < b - a <= 20 for n in range(a + 1, b)]
+        odd = [f"{a}→{b}" for a, b in zip(nums, nums[1:]) if b <= a or b - a > 20]
+        if missing:
+            more = "…" if len(missing) > 12 else ""
+            log(f"{tag} Note: chapter {', '.join(missing[:12])}{more} not found in the file "
+                f"(no heading and no text of that length where it should be).")
+        if odd:
+            more = "…" if len(odd) > 8 else ""
+            log(f"{tag} Note: numbering jumps at {', '.join(odd[:8])}{more}")
     else:
         chapters = real = _source_chapters(path, text)
         if settings.mode != "none":
@@ -911,7 +1134,13 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
     out_dir = path.parent / f"{path.stem}_Converted"
     out_dir.mkdir(exist_ok=True)
     opts = settings.output_options()
-    width = max(3, len(str(len(chapters))))
+    # Name files by chapter number when every chapter has a distinct one, so a chapter
+    # missing from the source doesn't shift every later file name.
+    real_nums = [c.number for c in chapters if c.index > 0]
+    by_number = None not in real_nums and len(set(real_nums)) == len(real_nums) and \
+        all(n > 0 for n in real_nums)
+    file_no = {id(c): (c.number if by_number and c.index > 0 else c.index) for c in chapters}
+    width = max(3, len(str(max(file_no.values(), default=0))))
     jobs: list[Callable[[], None]] = []
     for fmt in ("txt", "pdf", "epub"):
         if fmt not in settings.formats:
@@ -928,7 +1157,7 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
             fmt_dir = out_dir / fmt.upper()
             fmt_dir.mkdir(exist_ok=True)
             for ch, title, body in rows:
-                target = fmt_dir / f"{ch.index:0{width}d} {safe_filename(title)}.{fmt}"
+                target = fmt_dir / f"{file_no[id(ch)]:0{width}d} {safe_filename(title)}.{fmt}"
                 jobs.append(lambda w=writer, t=target, ti=title, b=body:
                             w(t, ti, [(ti, b)], opts))
     if "csv" in settings.formats:

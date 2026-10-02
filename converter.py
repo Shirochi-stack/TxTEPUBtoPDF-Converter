@@ -16,14 +16,15 @@ from PySide6.QtGui import (QColor, QDesktopServices, QKeySequence, QPainter, QPa
                            QPixmap, QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox,
                                QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QMessageBox, QProgressBar, QPushButton,
+                               QLineEdit, QListWidget, QMessageBox, QPlainTextEdit,
+                               QProgressBar, QPushButton,
                                QRadioButton, QSpinBox, QStackedWidget, QTextEdit, QVBoxLayout,
                                QWidget)
 
 import engine
 
 APP_NAME = "File Converter"
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 SETTINGS_FILE = APP_DIR / "config.json"
 FILE_FILTER = "Supported files (*.txt *.pdf *.epub);;All files (*)"
@@ -41,9 +42,9 @@ QFrame#side { background: #1f2733; border-radius: 8px; }
 QFrame#side QLabel, QFrame#side QStackedWidget, QFrame#side QStackedWidget > QWidget { background: transparent; }
 QListWidget, QTextEdit { background: #161616; border: 1px solid #333; border-radius: 6px; padding: 4px; }
 QListWidget::item:selected { background: #1f6aa5; color: white; }
-QLineEdit { background: #2f2f2f; border: 1px solid #555; border-radius: 5px; padding: 4px 6px; }
-QFrame#side QLineEdit { background: #2f2f2f; }
-QLineEdit:focus { border-color: #3b8ed0; }
+QLineEdit, QPlainTextEdit { background: #2f2f2f; border: 1px solid #555; border-radius: 5px; padding: 4px 6px; }
+QFrame#side QLineEdit, QFrame#side QPlainTextEdit { background: #2f2f2f; }
+QLineEdit:focus, QPlainTextEdit:focus { border-color: #3b8ed0; }
 QPushButton { background: #1f6aa5; color: white; border: none; border-radius: 6px; padding: 8px 16px; }
 QPushButton:hover { background: #2a7fc0; }
 QPushButton:disabled { background: #3a3a3a; color: #777; }
@@ -299,15 +300,21 @@ class FileConverter(QWidget):
         self.side_stack = QStackedWidget()
         side_layout.addWidget(self.side_stack)
 
-        def side_page(label, label_name, placeholder, hint, key):
+        def side_page(label, label_name, placeholder, hint, key, multiline=False):
             page = QWidget()
             lay = QVBoxLayout(page)
             lay.setSpacing(10)
             head = QLabel(label, objectName=label_name)
             head.setAlignment(Qt.AlignCenter)
-            entry = QLineEdit(s.get(key, ""))
+            if multiline:
+                entry = QPlainTextEdit(s.get(key, ""))
+                entry.setFixedHeight(118)
+                entry.textChanged.connect(self.save_settings)
+                entry.text = entry.toPlainText  # same accessor as the single-line boxes
+            else:
+                entry = QLineEdit(s.get(key, ""))
+                entry.editingFinished.connect(self.save_settings)
             entry.setPlaceholderText(placeholder)
-            entry.editingFinished.connect(self.save_settings)
             note = QLabel(hint, objectName="hint")
             note.setAlignment(Qt.AlignCenter)
             note.setWordWrap(True)
@@ -319,9 +326,12 @@ class FileConverter(QWidget):
             return entry
 
         self.example_entry = side_page(
-            "Paste an Example Here:", "accent", "e.g. 2화. 내가 허락했어",
-            "Just paste exactly how a chapter looks in your file.\n\n"
-            "Leave it empty to auto-detect common styles (Chapter 1, 1화, #001, 第一章 …).", "example")
+            "Paste Examples Here:", "accent", "e.g.\n2화. 내가 허락했어\n사이버펑크 협객전 127화",
+            "Paste how chapter headings look in your file, one example per line — "
+            "add one for each style the file uses.\n\n"
+            "Leave it empty to auto-detect. Either way, headings with a title prefix, "
+            "two-line headings and title-only chapters are picked up automatically.",
+            "example", multiline=True)
         self.naver_entry = side_page(
             "Naver Series URL:", "naver", "https://series.naver.com/novel/detail.series?productNo=…",
             "Fetches the official episode list and splits on those titles. "
