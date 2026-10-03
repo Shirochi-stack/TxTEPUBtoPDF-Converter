@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 3, 0, 0),
-    prodvers=(2, 3, 0, 0),
+    filevers=(2, 4, 0, 0),
+    prodvers=(2, 4, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
         [
           StringStruct(u'CompanyName', u'shirochi-stack'),
           StringStruct(u'FileDescription', u'TxTEPUBtoPDF Converter - TXT / PDF / EPUB converter and chapter splitter'),
-          StringStruct(u'FileVersion', u'2.3.0.0'),
+          StringStruct(u'FileVersion', u'2.4.0.0'),
           StringStruct(u'InternalName', u'TxTEPUBtoPDF-Converter'),
           StringStruct(u'LegalCopyright', u'Copyright (c) shirochi-stack'),
-          StringStruct(u'OriginalFilename', u'TxTEPUBtoPDF-Converter.v2.3.exe'),
+          StringStruct(u'OriginalFilename', u'TxTEPUBtoPDF-Converter.v2.4.exe'),
           StringStruct(u'ProductName', u'TxTEPUBtoPDF Converter'),
-          StringStruct(u'ProductVersion', u'2.3')
+          StringStruct(u'ProductVersion', u'2.4')
         ]
       )
     ]),

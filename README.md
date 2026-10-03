@@ -10,15 +10,24 @@ Converts between **TXT, PDF and EPUB** in any direction, splits novels into chap
 - **Chapter detection** – see [Chapter detection](#chapter-detection) below.
 - **Spacing** – standard, double space, or remove blank lines.
 - **Chapter prefix/suffix** – rename headings with a template such as `Ch.{n}` or `{n}화`.
-- **Number Titles** – optionally put each chapter's position in front of its title (`1. Prologue`, `2. 1화 …`). Front matter is left unnumbered, and merging already-numbered files doesn't stack numbers.
+- **Number Titles** – optionally put each chapter's position in front of its title (`1. Prologue`, `2. 1화 …`). Choose the first number in the **start at** box: `0` gives `0. Prologue`, `1. 1화 …` (`--number-start` on the command line). Front matter is left unnumbered, and merging already-numbered files doesn't stack numbers.
 - **PDF settings** – footer page numbers, table of contents (with or without page numbers), start page number, and layout-preserving EPUB → PDF (images + CSS, via WeasyPrint).
 - **Merge** – combine many TXT / PDF / EPUB files into a single TXT, PDF or EPUB.
 
-By default each input gets its own `<name>_Converted` subfolder next to the source file, so a batch never mixes outputs. Untick **Subfolder per Input File** (or use `--no-subfolders`) to write next to the source instead:
+All output goes into one main **`Converted`** folder next to your source files, and **Open Output Folder** opens that folder. Inside it, each input gets its own subfolder by default:
 
-- A merged file is named after its source (`book.txt` → `book.pdf`). If that would overwrite the source, `_converted` is added (`book_converted.txt`).
-- Inputs in one folder that share a name (`book.txt` + `book.pdf`) get their extension added (`book_txt.epub`, `book_pdf.epub`) so they can't overwrite each other.
-- Separate-chapter files go into per-format folders (`TXT\`, `PDF\` …) with the source name in front of each file name.
+```
+Novels\
+  alpha.txt
+  book.epub
+  Converted\
+    alpha\   alpha.pdf, alpha.epub …
+    book\    book.pdf, book.epub …
+```
+
+Untick **Subfolder per Input File** (or use `--no-subfolders`) to put every output file straight into `Converted\` instead. Separate-chapter files then go into per-format folders (`Converted\TXT\`, `Converted\PDF\` …) with the source name in front of each file name.
+
+Inputs in one folder that share a name (`book.txt` + `book.epub`) get their extension added (`book_txt`, `book_epub`) so their outputs can't overwrite each other. When you add a folder, anything already inside its `Converted` folder is skipped, so earlier results aren't converted again.
 
 ## Chapter detection
 
@@ -69,6 +78,6 @@ Headless batch mode: `python converter.py --cli --formats txt,epub book.pdf fold
 
 ## Build
 
-`build.bat` produces `dist\TxTEPUBtoPDF-Converter.v<version>.exe` (e.g. `TxTEPUBtoPDF-Converter.v2.3.exe`) from `converter.spec`; the version comes from `APP_VERSION` in `converter.py`, and the publisher details (shirochi-stack) from `version_info.txt`.
+`build.bat` produces `dist\TxTEPUBtoPDF-Converter.v<version>.exe` (e.g. `TxTEPUBtoPDF-Converter.v2.4.exe`) from `converter.spec`; the version comes from `APP_VERSION` in `converter.py`, and the publisher details (shirochi-stack) from `version_info.txt`.
 
 The layout-preserving EPUB → PDF option needs the GTK runtime (MSYS2 `mingw64`); without it the app falls back to its built-in text PDF writer.

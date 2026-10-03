@@ -1057,6 +1057,7 @@ class Settings:
     keep_layout: bool = False      # EPUB → PDF through WeasyPrint (images + CSS)
     split_notes: bool = False      # author's notes become their own chapter
     number_titles: bool = False    # prefix titles with their position: "1. ", "2. " …
+    number_start: int = 1          # first number used by number_titles (0 or 1 …)
     subfolders: bool = True        # each input's output in its own <name>_Converted folder
 
     def output_options(self) -> OutputOptions:
@@ -1074,6 +1075,10 @@ def collect_files(paths) -> list[Path]:
     for p in map(Path, paths):
         items = sorted(p.rglob("*"), key=natural_key) if p.is_dir() else [p]
         for f in items:
+            # When a folder is added, skip earlier results inside its Converted folders.
+            if p.is_dir() and any(part == OUTPUT_ROOT or part.endswith("_Converted")
+                                  for part in f.relative_to(p).parts[:-1]):
+                continue
             if f.is_file() and f.suffix.lower() in SUPPORTED_EXT:
                 found.setdefault(str(f.resolve()).lower(), f)
     return list(found.values())
@@ -1123,13 +1128,22 @@ def _layout_pdf(path: Path, target: Path, title: str, sections: list[Section],
         write_pdf(target, title, sections, settings.output_options())
 
 
+OUTPUT_ROOT = "Converted"
+
+
+def output_root(path: Path) -> Path:
+    """The main output folder for a source file: ``<source folder>\\Converted``."""
+    return Path(path).parent / OUTPUT_ROOT
+
+
 def output_layout(paths: list[Path], settings: Settings) -> dict[Path, tuple[Path, str]]:
     """Output folder and base file name for each input.
 
-    With ``settings.subfolders`` every input gets its own ``<name>_Converted`` folder;
-    without it, outputs go next to the source. Either way, inputs in the same folder
-    that share a name (book.txt + book.epub) get the source extension added
-    (``book_txt`` / ``book_epub``) so their outputs can't overwrite each other.
+    All output goes under one main ``Converted`` folder next to the sources. With
+    ``settings.subfolders`` each input gets its own subfolder inside it
+    (``Converted\\<name>``); without it, every file lands directly in ``Converted``.
+    Inputs in the same folder that share a name (book.txt + book.epub) get the
+    source extension added (``book_txt`` / ``book_epub``) so they can't collide.
     """
     paths = [Path(p) for p in paths]
     seen: dict[tuple[str, str], int] = {}
@@ -1140,7 +1154,8 @@ def output_layout(paths: list[Path], settings: Settings) -> dict[Path, tuple[Pat
     for p in paths:
         shared = seen[(str(p.parent.resolve()).lower(), p.stem.lower())] > 1
         name = f"{p.stem}_{p.suffix.lstrip('.').lower()}" if shared else p.stem
-        out[p] = (p.parent / f"{name}_Converted", name) if settings.subfolders else (p.parent, name)
+        root = output_root(p)
+        out[p] = (root / name, name) if settings.subfolders else (root, name)
     return out
 
 
@@ -1179,12 +1194,12 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
     rows = [(c, c.title(settings.template), apply_spacing(c.lines, settings.spacing))
             for c in chapters]
     if settings.number_titles:
-        rows = number_titles(rows, keep=lambda row: row[0].index > 0)
+        rows = number_titles(rows, keep=lambda row: row[0].index > 0, start=settings.number_start)
     sections = [(title, body) for _, title, body in rows]
     progress(0.2)
 
     out_dir, base = layout or output_layout([path], settings)[path]
-    out_dir.mkdir(exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     # Chapter files from several inputs can share a folder when subfolders are off.
     chapter_prefix = "" if settings.subfolders else f"{base} "
     opts = settings.output_options()
@@ -1195,7 +1210,7 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
         all(n > 0 for n in real_nums)
     file_no = {id(c): (c.number if by_number and c.index > 0 else c.index) for c in chapters}
     width = max(3, len(str(max(file_no.values(), default=0))))
-    jobs: list[Callable[[], None]] = []
+    jobs: list[tuple[str, Callable[[], None]]] = []  # (output format, write job)
     for fmt in ("txt", "pdf", "epub"):
         if fmt not in settings.formats:
             continue
@@ -1205,30 +1220,34 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
             if target.resolve() == path.resolve():  # e.g. book.txt -> book.txt next to the source
                 target = out_dir / f"{base}_converted.{fmt}"
             if fmt == "pdf" and settings.keep_layout and path.suffix.lower() == ".epub":
-                jobs.append(lambda t=target: _layout_pdf(path, t, path.stem, sections,
-                                                         settings, tag, log))
+                jobs.append((fmt, lambda t=target: _layout_pdf(path, t, path.stem, sections,
+                                                               settings, tag, log)))
             else:
-                jobs.append(lambda w=writer, t=target: w(t, path.stem, sections, opts))
+                jobs.append((fmt, lambda w=writer, t=target: w(t, path.stem, sections, opts)))
         else:
             fmt_dir = out_dir / fmt.upper()
             fmt_dir.mkdir(exist_ok=True)
             for ch, title, body in rows:
                 target = fmt_dir / (f"{chapter_prefix}{file_no[id(ch)]:0{width}d} "
                                     f"{safe_filename(title)}.{fmt}")
-                jobs.append(lambda w=writer, t=target, ti=title, b=body:
-                            w(t, ti, [(ti, b)], opts))
+                jobs.append((fmt, lambda w=writer, t=target, ti=title, b=body:
+                             w(t, ti, [(ti, b)], opts)))
     if "csv" in settings.formats:
-        jobs.append(lambda: write_master_csv(out_dir / f"{base}_master.csv", path.name, rows))
+        jobs.append(("csv", lambda: write_master_csv(out_dir / f"{base}_master.csv", path.name, rows)))
 
-    def guarded(job):
-        if cancel is None or not cancel.is_set():
-            job()
+    def guarded(job) -> bool:
+        if cancel is not None and cancel.is_set():
+            return False
+        job()
+        return True
 
     failures = 0
-    futures = [io_pool.submit(guarded, job) for job in jobs]
+    written: dict[str, int] = {}  # output format -> files written
+    futures = {io_pool.submit(guarded, job): fmt for fmt, job in jobs}
     for done, fut in enumerate(as_completed(futures), 1):
         try:
-            fut.result()
+            if fut.result():
+                written[futures[fut]] = written.get(futures[fut], 0) + 1
         except Exception as e:  # keep going; one bad chapter shouldn't sink the file
             failures += 1
             if failures <= 5:
@@ -1239,8 +1258,9 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
         log(f"{tag} Cancelled.")
     else:
         log(f"{tag} Done → {out_dir}" + (f"  ({failures} write errors)" if failures else ""))
-    return {"file": path, "chapters": len(real), "outputs": len(jobs) - failures,
-            "failures": failures, "out_dir": out_dir}
+    return {"file": path, "chapters": len(real), "outputs": sum(written.values()),
+            "by_format": written, "failures": failures, "out_dir": out_dir,
+            "root": output_root(path)}
 
 
 def process_batch(paths: list[Path], settings: Settings, log: LogFn, progress: ProgressFn,
@@ -1301,20 +1321,20 @@ def _read_for_merge(path: Path) -> list[tuple[str, str]]:
     return [(path.stem, read_text(path))]
 
 
-def number_titles(rows: list[tuple], keep=lambda row: True) -> list[tuple]:
+def number_titles(rows: list[tuple], keep=lambda row: True, start: int = 1) -> list[tuple]:
     """Put each entry's position in front of its title: "1. Title", "2. Title" …
 
-    ``rows`` are tuples whose title sits at index -2 (sections and chapter rows);
-    entries rejected by ``keep`` (front matter) are left unnumbered. A position
-    number already in front ("3. Title", e.g. from merging numbered files) is
-    replaced rather than stacked.
+    Counting begins at ``start`` (e.g. 0 so a prologue is "0."). ``rows`` are tuples
+    whose title sits at index -2 (sections and chapter rows); entries rejected by
+    ``keep`` (front matter) are left unnumbered. A position number already in front
+    ("3. Title", e.g. from merging numbered files) is replaced rather than stacked.
     """
-    out, n = [], 0
+    out, n = [], start
     for row in rows:
         if keep(row):
-            n += 1
             title = re.sub(r"^\d+\.\s+", "", row[-2])
             row = (*row[:-2], f"{n}. {title}", row[-1])
+            n += 1
         out.append(row)
     return out
 
@@ -1366,7 +1386,7 @@ def merge_files(paths: list[Path], out_path: Path, settings: Settings, log: LogF
     if not sections:
         raise ValueError("Nothing to merge: no readable text in the selected files.")
     if settings.number_titles:
-        sections = number_titles(sections)
+        sections = number_titles(sections, start=settings.number_start)
     log(f"Writing {len(sections)} sections…")
     _WRITERS[fmt](out_path, out_path.stem, sections, settings.output_options())
     progress(1.0)

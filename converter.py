@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 import engine
 
 APP_NAME = "File Converter"
-APP_VERSION = "2.3"
+APP_VERSION = "2.4"
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 SETTINGS_FILE = APP_DIR / "config.json"
 SETTINGS_VERSION = 2
@@ -233,8 +233,9 @@ class FileConverter(QWidget):
         self.subfolders_check = QCheckBox("Subfolder per Input File")
         self.subfolders_check.setChecked(s.get("subfolders", True))
         self.subfolders_check.setToolTip(
-            "On: each input's output goes into its own \"<name>_Converted\" folder.\n"
-            "Off: output is written next to the source file.")
+            "All output goes into one \"Converted\" folder next to your files.\n"
+            "On: each input gets its own subfolder inside it (Converted\\<name>).\n"
+            "Off: every output file goes straight into Converted.")
         self.subfolders_check.stateChanged.connect(self.on_option_changed)
         box.addSpacing(4)
         box.addWidget(self.subfolders_check)
@@ -377,12 +378,20 @@ class FileConverter(QWidget):
         prefix_row.addWidget(self.prefix_entry)
         prefix_row.addWidget(QLabel("(Use {n} for number, e.g. Ch.{n} or {n}화)", objectName="hint"))
         prefix_row.addSpacing(20)
-        self.number_titles_check = QCheckBox("Number Titles (1. 2. 3. …)", objectName="accent")
+        self.number_titles_check = QCheckBox("Number Titles, start at", objectName="accent")
         self.number_titles_check.setChecked(s.get("number_titles", False))
         self.number_titles_check.setToolTip(
-            "Put each chapter's position in front of its title, e.g. \"1. Prologue\", \"2. 1화 …\".")
+            "Put each chapter's position in front of its title, e.g. \"1. Prologue\", \"2. 1화 …\".\n"
+            "Start at 0 to number a prologue as \"0.\".")
         self.number_titles_check.stateChanged.connect(self.on_option_changed)
+        self.number_start_spin = NoScrollSpinBox()
+        self.number_start_spin.setRange(0, 99999)
+        self.number_start_spin.setFixedWidth(70)
+        self.number_start_spin.setValue(s.get("number_start", 1))
+        self.number_start_spin.setToolTip("First number used: 0 → \"0. \", \"1. \" …   1 → \"1. \", \"2. \" …")
+        self.number_start_spin.valueChanged.connect(self.on_option_changed)
         prefix_row.addWidget(self.number_titles_check)
+        prefix_row.addWidget(self.number_start_spin)
         prefix_row.addSpacing(20)
         prefix_row.addWidget(QLabel("Parallel threads:"))
         self.threads_spin = NoScrollSpinBox()
@@ -456,6 +465,7 @@ class FileConverter(QWidget):
             "keep_layout": self.keep_layout_check.isChecked(),
             "split_notes": self.split_notes_check.isChecked(),
             "number_titles": self.number_titles_check.isChecked(),
+            "number_start": self.number_start_spin.value(),
             "subfolders": self.subfolders_check.isChecked(),
         }
         try:
@@ -498,6 +508,7 @@ class FileConverter(QWidget):
         self.toc_start_label.setEnabled(pdf)
         self.toc_start_page_spin.setEnabled(pdf)
         self.prefix_entry.setEnabled(self.prefix_check.isChecked())
+        self.number_start_spin.setEnabled(self.number_titles_check.isChecked())
 
     def build_settings(self):
         return engine.Settings(
@@ -516,6 +527,7 @@ class FileConverter(QWidget):
             keep_layout=self.keep_layout_check.isChecked(),
             split_notes=self.split_notes_check.isChecked(),
             number_titles=self.number_titles_check.isChecked(),
+            number_start=self.number_start_spin.value(),
             subfolders=self.subfolders_check.isChecked(),
         )
 
@@ -641,20 +653,50 @@ class FileConverter(QWidget):
         ok = [r for r in results if "error" not in r]
         failed = [r for r in results if "error" in r and r["error"] != "cancelled"]
         cancelled = len(results) - len(ok) - len(failed)
-        outputs = sum(r["outputs"] for r in ok)
         self.progress_bar.setValue(1000)
-        summary = f"{len(ok)} file(s) processed, {outputs} output file(s) written."
-        if failed:
-            summary += f"\n{len(failed)} file(s) failed — see the log."
-        if cancelled:
-            summary += f"\n{cancelled} file(s) cancelled."
-        self.log(summary.replace("\n", "  "))
+        summary = self.summarize(ok, failed, cancelled)
+        roots = list(dict.fromkeys(str(r["root"]) for r in ok))  # one per source folder
+        self.log(" | ".join(line.strip() for line in summary.splitlines() if line.strip()))
         box = QMessageBox(QMessageBox.Warning if failed else QMessageBox.Information,
                           "Done", summary, QMessageBox.Ok, self)
-        open_button = box.addButton("Open Output Folder", QMessageBox.ActionRole) if ok else None
+        label = "Open Output Folder" if len(roots) <= 1 else "Open Output Folders"
+        open_button = box.addButton(label, QMessageBox.ActionRole) if ok else None
         box.exec()
         if open_button is not None and box.clickedButton() is open_button:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(ok[0]["out_dir"])))
+            for root in roots:  # usually one; one per source folder if inputs came from several
+                QDesktopServices.openUrl(QUrl.fromLocalFile(root))
+
+    @staticmethod
+    def summarize(ok, failed, cancelled, max_listed=8):
+        """Done-dialog text: what went in (input files) and what came out (per format)."""
+        plural = lambda n, word: f"{n} {word}{'' if n == 1 else 's'}"
+        # Results arrive in finishing order; list them the way the file list shows them.
+        ok = sorted(ok, key=lambda r: engine.natural_key(r["file"]))
+        failed = sorted(failed, key=lambda r: engine.natural_key(r["file"]))
+        lines = [f"Input files: {len(ok)} converted"
+                 + (f", {len(failed)} failed" if failed else "")
+                 + (f", {cancelled} cancelled" if cancelled else "")]
+        for r in ok[:max_listed]:
+            lines.append(f"    • {r['file'].name}  —  {plural(r['chapters'], 'chapter')}")
+        if len(ok) > max_listed:
+            lines.append(f"    • … and {len(ok) - max_listed} more")
+        for r in failed[:max_listed]:
+            lines.append(f"    ✗ {Path(r['file']).name}  —  failed (see the log)")
+
+        by_format: dict[str, int] = {}
+        for r in ok:
+            for fmt, n in r.get("by_format", {}).items():
+                by_format[fmt] = by_format.get(fmt, 0) + n
+        total = sum(by_format.values())
+        lines += ["", f"Output files: {total} written"]
+        for fmt in ("txt", "pdf", "epub", "csv"):
+            if fmt in by_format:
+                lines.append(f"    • {fmt.upper()}: {plural(by_format[fmt], 'file')}")
+
+        roots = list(dict.fromkeys(str(r["root"]) for r in ok))
+        if roots:
+            lines += ["", "Output folder:" if len(roots) == 1 else "Output folders:"] + roots
+        return "\n".join(lines)
 
     def on_merge(self):
         self.save_settings()
@@ -713,8 +755,10 @@ def run_cli(argv):
                         help="EPUB -> PDF through WeasyPrint (images + CSS)")
     parser.add_argument("--split-notes", action="store_true",
                         help="make author's notes (e.g. Author's Note) separate chapters")
+    parser.add_argument("--number-start", type=int, default=1,
+                        help="first number for --number-titles (e.g. 0 or 1; default 1)")
     parser.add_argument("--no-subfolders", action="store_true",
-                        help="write output next to each source instead of a <name>_Converted folder")
+                        help="put all output straight into the Converted folder (no per-input subfolders)")
     parser.add_argument("--number-titles", action="store_true",
                         help='put each chapter\'s position in front of its title ("1. ", "2. " ...)')
     parser.add_argument("--threads", type=engine.clamp_workers, default=engine.DEFAULT_WORKERS,
@@ -735,6 +779,7 @@ def run_cli(argv):
         spacing=args.spacing, mode=args.mode, example=args.example, template=args.prefix,
         toc=args.toc, keep_layout=args.keep_layout, workers=args.threads,
         split_notes=args.split_notes, number_titles=args.number_titles,
+        number_start=args.number_start,
         subfolders=not args.no_subfolders)
     results = engine.process_batch(engine.collect_files(args.paths), settings, log, lambda f: None)
     if args.log:
