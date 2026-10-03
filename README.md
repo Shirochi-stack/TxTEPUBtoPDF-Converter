@@ -10,10 +10,15 @@ Converts between **TXT, PDF and EPUB** in any direction, splits novels into chap
 - **Chapter detection** – see [Chapter detection](#chapter-detection) below.
 - **Spacing** – standard, double space, or remove blank lines.
 - **Chapter prefix/suffix** – rename headings with a template such as `Ch.{n}` or `{n}화`.
+- **Number Titles** – optionally put each chapter's position in front of its title (`1. Prologue`, `2. 1화 …`). Front matter is left unnumbered, and merging already-numbered files doesn't stack numbers.
 - **PDF settings** – footer page numbers, table of contents (with or without page numbers), start page number, and layout-preserving EPUB → PDF (images + CSS, via WeasyPrint).
 - **Merge** – combine many TXT / PDF / EPUB files into a single TXT, PDF or EPUB.
 
-Output goes to a `<name>_Converted` folder next to each source file.
+By default each input gets its own `<name>_Converted` subfolder next to the source file, so a batch never mixes outputs. Untick **Subfolder per Input File** (or use `--no-subfolders`) to write next to the source instead:
+
+- A merged file is named after its source (`book.txt` → `book.pdf`). If that would overwrite the source, `_converted` is added (`book_converted.txt`).
+- Inputs in one folder that share a name (`book.txt` + `book.pdf`) get their extension added (`book_txt.epub`, `book_pdf.epub`) so they can't overwrite each other.
+- Separate-chapter files go into per-format folders (`TXT\`, `PDF\` …) with the source name in front of each file name.
 
 ## Chapter detection
 
@@ -45,6 +50,7 @@ Web novels often change how chapter headings look partway through. In all modes 
 - **Title-only chapters** – where numbered headings stop, chapters headed only by a title are found and numbered in sequence:
   - title series such as `EP.6 별이 빛나는 밤에`, `EP.6 별이 빛나는 밤에 2`, `EP.6 별이 빛나는 밤에 3`
   - single titles such as `계약` or `LET'S RIDE!`, picked when they sit about one chapter's length apart
+- **Author's notes stay with their chapter** – notices such as `작가의 말`, `[작가의 말]`, `후기`, `공지`, `Author's Note`, `A/N` or `Afterword` remain at the end of the chapter they follow. Tick **Split Author's Notes Into Own Chapters** (or use `--split-notes`) to make each one a separate chapter; either way they don't affect chapter numbering. Prologue, epilogue and side stories (`프롤로그`, `에필로그`, `외전`, `번외` …) are still split as chapters.
 - **Missing chapters** – where a number is skipped (137 → 139), the app looks for an unlabelled chapter in between. If there is none, the log names the chapter that is not in the file instead of renumbering everything after it.
 - **Noise is ignored** – scene breaks (`* * *`), inserted blocks (`//* … *//`), comment threads, sound effects and table-of-contents pages are not treated as chapter headings.
 
@@ -63,6 +69,6 @@ Headless batch mode: `python converter.py --cli --formats txt,epub book.pdf fold
 
 ## Build
 
-`build.bat` produces `dist\TxTEPUBtoPDF-Converter.v<version>.exe` (e.g. `TxTEPUBtoPDF-Converter.v2.2.exe`) from `converter.spec`; the version comes from `APP_VERSION` in `converter.py`, and the publisher details (shirochi-stack) from `version_info.txt`.
+`build.bat` produces `dist\TxTEPUBtoPDF-Converter.v<version>.exe` (e.g. `TxTEPUBtoPDF-Converter.v2.3.exe`) from `converter.spec`; the version comes from `APP_VERSION` in `converter.py`, and the publisher details (shirochi-stack) from `version_info.txt`.
 
 The layout-preserving EPUB → PDF option needs the GTK runtime (MSYS2 `mingw64`); without it the app falls back to its built-in text PDF writer.

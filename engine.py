@@ -294,9 +294,20 @@ RULE_KOREAN = Rule("N화 (Korean)",
                    r"^(?:제\s*)?(?P<n>\d{1,6})\s*화\.?(?:\s+(?P<t>.{1,100}))?$")
 RULE_HASH = Rule("#NNN.", r"^#\s*(?P<n>\d{1,6})\.?(?:\s+(?P<t>.{1,100}))?$")
 
+# Story sections that are chapters of their own even without a number.
 _SPECIAL = re.compile(
-    r"^(?:prologue|epilogue|afterword|side\s*story|프롤로그|에필로그|외전|번외|후기|작가의\s*말"
+    r"^(?:prologue|epilogue|side\s*story|프롤로그|에필로그|외전|번외"
     r"|序章|终章|終章|番外)(?:\s*[:.\-–—]\s*.{0,40}|\s*\d{1,4}\s*화?\.?)?$", re.IGNORECASE)
+# Author / translator notices. By default they stay at the end of the chapter they follow.
+_AUTHOR_NOTE = re.compile(
+    r"^[\[\(<【〈]?\s*(?:작가의\s*말|작가\s*후기|역자\s*후기|후기|공지(?:\s*사항)?|알림"
+    r"|author'?s?\s*notes?|a\s*/\s*n|afterword|translator'?s?\s*notes?|t\s*/\s*n"
+    r"|作者的话|作者有话说|後書き|あとがき)\s*[\]\)>】〉]?(?:\s*[:.\-–—]\s*.{0,40}|\s*\d{1,4})?$",
+    re.IGNORECASE)
+
+
+def _is_special(heading: str) -> bool:
+    return bool(_SPECIAL.match(heading) or _AUTHOR_NOTE.match(heading))
 
 _AUTO_RULES = [
     Rule("Chapter N", rf"^(?:chapter|chap\.?|ch\.?)\s*(?P<n>\d{{1,6}}){_SEP}(?P<t>.{{0,100}})$"),
@@ -403,8 +414,12 @@ def _best_chain(nums: list[int]) -> set[int]:
     return keep
 
 
-def find_headings(lines: list[str], rule) -> list[tuple]:
-    """Return [(line_index, number, subtitle, heading_text, body_start_line)]."""
+def find_headings(lines: list[str], rule, split_notes: bool = False) -> list[tuple]:
+    """Return [(line_index, number, subtitle, heading_text, body_start_line)].
+
+    Author's notes ("작가의 말", "Author's Note" …) only become their own chapter
+    with ``split_notes``; otherwise they stay in the chapter before them.
+    """
     if hasattr(rule, "find"):
         return rule.find(lines)
     hits = []
@@ -415,7 +430,7 @@ def find_headings(lines: list[str], rule) -> list[tuple]:
         r = rule.match(s)
         if r:
             hits.append((i, r[0], r[1], r[2] if len(r) > 2 else s, i + 1))
-        elif _SPECIAL.match(s):
+        elif _SPECIAL.match(s) or (split_notes and _AUTHOR_NOTE.match(s)):
             hits.append((i, None, "", s, i + 1))
     if rule.sequential:
         numbered = [k for k, h in enumerate(hits) if h[1] is not None]
@@ -426,7 +441,8 @@ def find_headings(lines: list[str], rule) -> list[tuple]:
     later = {ident(h): k for k, h in enumerate(hits)}
     kept = []
     for k, h in enumerate(hits):
-        if later[ident(h)] > k:
+        # Author's notes repeat by nature and are short, so they never look like a TOC.
+        if later[ident(h)] > k and not _AUTHOR_NOTE.match(h[3]):
             end = hits[k + 1][0] if k + 1 < len(hits) else len(lines)
             if sum(1 for ln in lines[h[0] + 1:end] if ln.strip()) <= 6:
                 continue
@@ -561,15 +577,16 @@ class SmartRule:
     numtype = "int"
     sequential = False
 
-    def __init__(self, base: list | None = None):
+    def __init__(self, base: list | None = None, split_notes: bool = False):
         self.base = [r for r in (base or []) if r]
+        self.split_notes = split_notes
         self.name = "smart detection"
 
     def find(self, lines: list[str]) -> list[tuple]:
         base = self.base or [r for r in [detect_rule(lines)] if r]
         hits: dict[int, tuple] = {}
         for rule in base:
-            for h in find_headings(lines, rule):
+            for h in find_headings(lines, rule, self.split_notes):
                 hits.setdefault(h[0], h)
         for rule in base:
             if not rule.sequential:
@@ -578,7 +595,8 @@ class SmartRule:
         strong = len(hits)
 
         mask = _block_mask(lines)
-        titleish = lambda i: _titleish(lines, i) and not mask[i]
+        titleish = lambda i: (_titleish(lines, i) and not mask[i]
+                              and not _AUTHOR_NOTE.match(lines[i].strip()))
         consumed = set()
         for i in sorted(hits):
             h = hits[i]
@@ -639,7 +657,7 @@ class SmartRule:
         for i, number, subtitle, heading, body in ordered:
             if number is not None:
                 counter = number
-            elif not _SPECIAL.match(heading):
+            elif not _is_special(heading):
                 counter += 1
                 number = counter
                 if not re.search(r"\w", heading):  # bare separators such as "***"
@@ -675,9 +693,9 @@ class SmartRule:
                 cls._split(cum, median, c, hi, cands, None))
 
 
-def split_text(text: str, rule) -> list[Chapter]:
+def split_text(text: str, rule, split_notes: bool = False) -> list[Chapter]:
     lines = text.split("\n")
-    hits = find_headings(lines, rule) if rule else []
+    hits = find_headings(lines, rule, split_notes) if rule else []
     if not hits:
         return []
     chapters = []
@@ -686,7 +704,7 @@ def split_text(text: str, rule) -> list[Chapter]:
         chapters.append(Chapter(0, None, "Front Matter", "", front))
     for seq, (start, number, subtitle, heading, body_start) in enumerate(hits, 1):
         end = hits[seq][0] if seq < len(hits) else len(lines)
-        if rule.numtype is None and not _SPECIAL.match(heading):
+        if rule.numtype is None and not _is_special(heading):
             number = seq
             if not re.search(r"\w", heading):  # bare separators such as "***"
                 heading = f"Chapter {seq}"
@@ -1037,6 +1055,9 @@ class Settings:
     toc_numbers: bool = True
     start_page: int = 1
     keep_layout: bool = False      # EPUB → PDF through WeasyPrint (images + CSS)
+    split_notes: bool = False      # author's notes become their own chapter
+    number_titles: bool = False    # prefix titles with their position: "1. ", "2. " …
+    subfolders: bool = True        # each input's output in its own <name>_Converted folder
 
     def output_options(self) -> OutputOptions:
         return OutputOptions(self.spacing == "remove", self.page_numbers, self.toc,
@@ -1063,7 +1084,7 @@ def _resolve_rule(settings: Settings, lines: list[str], naver_rule, tag: str, lo
         return None
     presets = {"numeric": RULE_NUMERIC, "korean": RULE_KOREAN, "hash": RULE_HASH}
     if settings.mode in presets:
-        return SmartRule([presets[settings.mode]])
+        return SmartRule([presets[settings.mode]], settings.split_notes)
     if settings.mode == "naver" and naver_rule:
         found = len(find_headings(lines, naver_rule))
         if found >= 2:
@@ -1073,8 +1094,9 @@ def _resolve_rule(settings: Settings, lines: list[str], naver_rule, tag: str, lo
         log(f"{tag} Naver titles not found in the text; falling back to auto-detect.")
     elif settings.mode == "auto":
         # One example per line; each becomes its own pattern.
-        return SmartRule([rule_from_example(ex) for ex in settings.example.splitlines() if ex.strip()])
-    return SmartRule()
+        return SmartRule([rule_from_example(ex) for ex in settings.example.splitlines() if ex.strip()],
+                         settings.split_notes)
+    return SmartRule(split_notes=settings.split_notes)
 
 
 def _source_chapters(path: Path, text: str) -> list[Chapter]:
@@ -1101,8 +1123,30 @@ def _layout_pdf(path: Path, target: Path, title: str, sections: list[Section],
         write_pdf(target, title, sections, settings.output_options())
 
 
+def output_layout(paths: list[Path], settings: Settings) -> dict[Path, tuple[Path, str]]:
+    """Output folder and base file name for each input.
+
+    With ``settings.subfolders`` every input gets its own ``<name>_Converted`` folder;
+    without it, outputs go next to the source. Either way, inputs in the same folder
+    that share a name (book.txt + book.epub) get the source extension added
+    (``book_txt`` / ``book_epub``) so their outputs can't overwrite each other.
+    """
+    paths = [Path(p) for p in paths]
+    seen: dict[tuple[str, str], int] = {}
+    for p in paths:
+        key = (str(p.parent.resolve()).lower(), p.stem.lower())
+        seen[key] = seen.get(key, 0) + 1
+    out = {}
+    for p in paths:
+        shared = seen[(str(p.parent.resolve()).lower(), p.stem.lower())] > 1
+        name = f"{p.stem}_{p.suffix.lstrip('.').lower()}" if shared else p.stem
+        out[p] = (p.parent / f"{name}_Converted", name) if settings.subfolders else (p.parent, name)
+    return out
+
+
 def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPoolExecutor,
-                 log: LogFn, progress: ProgressFn, cancel: threading.Event | None = None) -> dict:
+                 log: LogFn, progress: ProgressFn, cancel: threading.Event | None = None,
+                 layout: tuple[Path, str] | None = None) -> dict:
     path = Path(path)
     tag = f"[{path.name}]"
     log(f"{tag} Reading…")
@@ -1112,7 +1156,7 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
     progress(0.1)
 
     rule = _resolve_rule(settings, text.split("\n"), naver_rule, tag, log)
-    chapters = split_text(text, rule) if rule else []
+    chapters = split_text(text, rule, settings.split_notes) if rule else []
     real = [c for c in chapters if c.index > 0]
     if chapters:
         log(f"{tag} {len(real)} chapters found using {rule.name}.")
@@ -1134,11 +1178,15 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
 
     rows = [(c, c.title(settings.template), apply_spacing(c.lines, settings.spacing))
             for c in chapters]
+    if settings.number_titles:
+        rows = number_titles(rows, keep=lambda row: row[0].index > 0)
     sections = [(title, body) for _, title, body in rows]
     progress(0.2)
 
-    out_dir = path.parent / f"{path.stem}_Converted"
+    out_dir, base = layout or output_layout([path], settings)[path]
     out_dir.mkdir(exist_ok=True)
+    # Chapter files from several inputs can share a folder when subfolders are off.
+    chapter_prefix = "" if settings.subfolders else f"{base} "
     opts = settings.output_options()
     # Name files by chapter number when every chapter has a distinct one, so a chapter
     # missing from the source doesn't shift every later file name.
@@ -1153,7 +1201,9 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
             continue
         writer = _WRITERS[fmt]
         if settings.merged:
-            target = out_dir / f"{path.stem}.{fmt}"
+            target = out_dir / f"{base}.{fmt}"
+            if target.resolve() == path.resolve():  # e.g. book.txt -> book.txt next to the source
+                target = out_dir / f"{base}_converted.{fmt}"
             if fmt == "pdf" and settings.keep_layout and path.suffix.lower() == ".epub":
                 jobs.append(lambda t=target: _layout_pdf(path, t, path.stem, sections,
                                                          settings, tag, log))
@@ -1163,11 +1213,12 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
             fmt_dir = out_dir / fmt.upper()
             fmt_dir.mkdir(exist_ok=True)
             for ch, title, body in rows:
-                target = fmt_dir / f"{file_no[id(ch)]:0{width}d} {safe_filename(title)}.{fmt}"
+                target = fmt_dir / (f"{chapter_prefix}{file_no[id(ch)]:0{width}d} "
+                                    f"{safe_filename(title)}.{fmt}")
                 jobs.append(lambda w=writer, t=target, ti=title, b=body:
                             w(t, ti, [(ti, b)], opts))
     if "csv" in settings.formats:
-        jobs.append(lambda: write_master_csv(out_dir / f"{path.stem}_master.csv", path.name, rows))
+        jobs.append(lambda: write_master_csv(out_dir / f"{base}_master.csv", path.name, rows))
 
     def guarded(job):
         if cancel is None or not cancel.is_set():
@@ -1210,10 +1261,13 @@ def process_batch(paths: list[Path], settings: Settings, log: LogFn, progress: P
             progress(overall)
         return update
 
+    layouts = output_layout(paths, settings)
+
     def run(i: int, p: Path) -> dict:
         if cancel is not None and cancel.is_set():
             return {"file": Path(p), "error": "cancelled"}
-        return process_file(p, settings, naver_rule, io_pool, log, file_progress(i), cancel)
+        return process_file(p, settings, naver_rule, io_pool, log, file_progress(i), cancel,
+                            layouts[Path(p)])
 
     results = []
     workers = clamp_workers(settings.workers)
@@ -1245,6 +1299,24 @@ def _read_for_merge(path: Path) -> list[tuple[str, str]]:
         return [(title or (f"{path.stem} – {i}" if many else path.stem), _clean(text))
                 for i, (title, text) in enumerate(parts, 1)]
     return [(path.stem, read_text(path))]
+
+
+def number_titles(rows: list[tuple], keep=lambda row: True) -> list[tuple]:
+    """Put each entry's position in front of its title: "1. Title", "2. Title" …
+
+    ``rows`` are tuples whose title sits at index -2 (sections and chapter rows);
+    entries rejected by ``keep`` (front matter) are left unnumbered. A position
+    number already in front ("3. Title", e.g. from merging numbered files) is
+    replaced rather than stacked.
+    """
+    out, n = [], 0
+    for row in rows:
+        if keep(row):
+            n += 1
+            title = re.sub(r"^\d+\.\s+", "", row[-2])
+            row = (*row[:-2], f"{n}. {title}", row[-1])
+        out.append(row)
+    return out
 
 
 def _retitle(name: str, template: str) -> str:
@@ -1293,6 +1365,8 @@ def merge_files(paths: list[Path], out_path: Path, settings: Settings, log: LogF
             sections.append((title, body))
     if not sections:
         raise ValueError("Nothing to merge: no readable text in the selected files.")
+    if settings.number_titles:
+        sections = number_titles(sections)
     log(f"Writing {len(sections)} sections…")
     _WRITERS[fmt](out_path, out_path.stem, sections, settings.output_options())
     progress(1.0)

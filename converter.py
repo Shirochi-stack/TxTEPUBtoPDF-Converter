@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 import engine
 
 APP_NAME = "File Converter"
-APP_VERSION = "2.2"
+APP_VERSION = "2.3"
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 SETTINGS_FILE = APP_DIR / "config.json"
 SETTINGS_VERSION = 2
@@ -230,6 +230,14 @@ class FileConverter(QWidget):
         box = column(1, "File Mode:")
         self.file_mode = radios(box, "file_mode", [("merged", "One Merged File", ""),
                                                    ("separate", "Separate Chapters", "")], "merged")
+        self.subfolders_check = QCheckBox("Subfolder per Input File")
+        self.subfolders_check.setChecked(s.get("subfolders", True))
+        self.subfolders_check.setToolTip(
+            "On: each input's output goes into its own \"<name>_Converted\" folder.\n"
+            "Off: output is written next to the source file.")
+        self.subfolders_check.stateChanged.connect(self.on_option_changed)
+        box.addSpacing(4)
+        box.addWidget(self.subfolders_check)
         box.addStretch()
 
         box = column(2, "Spacing:")
@@ -246,6 +254,14 @@ class FileConverter(QWidget):
             ("korean", "1화. / 2화. (Korean)", ""),
             ("hash", "#001. / #002.", ""),
             ("naver", "Via Naver Series Link", "red")], "auto")
+        self.split_notes_check = QCheckBox("Split Author's Notes Into Own Chapters")
+        self.split_notes_check.setChecked(s.get("split_notes", False))
+        self.split_notes_check.setToolTip(
+            "Off: notices such as 작가의 말 / 후기 / Author's Note stay at the end of the chapter\n"
+            "they follow. On: each one becomes a separate chapter.")
+        self.split_notes_check.stateChanged.connect(self.on_option_changed)
+        box.addSpacing(4)
+        box.addWidget(self.split_notes_check)
         box.addStretch()
 
         box = column(4, "PDF Settings:")
@@ -360,7 +376,14 @@ class FileConverter(QWidget):
         prefix_row.addWidget(self.prefix_check)
         prefix_row.addWidget(self.prefix_entry)
         prefix_row.addWidget(QLabel("(Use {n} for number, e.g. Ch.{n} or {n}화)", objectName="hint"))
-        prefix_row.addSpacing(28)
+        prefix_row.addSpacing(20)
+        self.number_titles_check = QCheckBox("Number Titles (1. 2. 3. …)", objectName="accent")
+        self.number_titles_check.setChecked(s.get("number_titles", False))
+        self.number_titles_check.setToolTip(
+            "Put each chapter's position in front of its title, e.g. \"1. Prologue\", \"2. 1화 …\".")
+        self.number_titles_check.stateChanged.connect(self.on_option_changed)
+        prefix_row.addWidget(self.number_titles_check)
+        prefix_row.addSpacing(20)
         prefix_row.addWidget(QLabel("Parallel threads:"))
         self.threads_spin = NoScrollSpinBox()
         self.threads_spin.setRange(1, engine.LOGICAL_CORES)  # out-of-range saved values clamp
@@ -431,6 +454,9 @@ class FileConverter(QWidget):
             "toc_numbers": self.toc_numbers_check.isChecked(),
             "toc_start_page": self.toc_start_page_spin.value(),
             "keep_layout": self.keep_layout_check.isChecked(),
+            "split_notes": self.split_notes_check.isChecked(),
+            "number_titles": self.number_titles_check.isChecked(),
+            "subfolders": self.subfolders_check.isChecked(),
         }
         try:
             SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=1),
@@ -488,6 +514,9 @@ class FileConverter(QWidget):
             toc_numbers=self.toc_numbers_check.isChecked(),
             start_page=self.toc_start_page_spin.value(),
             keep_layout=self.keep_layout_check.isChecked(),
+            split_notes=self.split_notes_check.isChecked(),
+            number_titles=self.number_titles_check.isChecked(),
+            subfolders=self.subfolders_check.isChecked(),
         )
 
     # ---- file selection ----------------------------------------------------
@@ -681,7 +710,13 @@ def run_cli(argv):
     parser.add_argument("--prefix", default=None, help="chapter title template, e.g. Ch.{n}")
     parser.add_argument("--toc", action="store_true", help="add a table of contents to PDFs")
     parser.add_argument("--keep-layout", action="store_true",
-                        help="EPUB → PDF through WeasyPrint (images + CSS)")
+                        help="EPUB -> PDF through WeasyPrint (images + CSS)")
+    parser.add_argument("--split-notes", action="store_true",
+                        help="make author's notes (e.g. Author's Note) separate chapters")
+    parser.add_argument("--no-subfolders", action="store_true",
+                        help="write output next to each source instead of a <name>_Converted folder")
+    parser.add_argument("--number-titles", action="store_true",
+                        help='put each chapter\'s position in front of its title ("1. ", "2. " ...)')
     parser.add_argument("--threads", type=engine.clamp_workers, default=engine.DEFAULT_WORKERS,
                         help=f"1-{engine.LOGICAL_CORES} (logical cores on this PC)")
     parser.add_argument("--log", default=None, help="also write the log to this file")
@@ -698,7 +733,9 @@ def run_cli(argv):
     settings = engine.Settings(
         formats=set(args.formats.lower().split(",")), merged=not args.separate,
         spacing=args.spacing, mode=args.mode, example=args.example, template=args.prefix,
-        toc=args.toc, keep_layout=args.keep_layout, workers=args.threads)
+        toc=args.toc, keep_layout=args.keep_layout, workers=args.threads,
+        split_notes=args.split_notes, number_titles=args.number_titles,
+        subfolders=not args.no_subfolders)
     results = engine.process_batch(engine.collect_files(args.paths), settings, log, lambda f: None)
     if args.log:
         Path(args.log).write_text("\n".join(lines) + "\n", encoding="utf-8")
