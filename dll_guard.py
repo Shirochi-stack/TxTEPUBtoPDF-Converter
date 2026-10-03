@@ -9,7 +9,7 @@ importing QtGui".
 ``protect()`` loads the genuine copy of every DLL that has a look-alike next to the
 exe — the bundled one if the app ships it, otherwise the System32 one — by full
 path. Windows reuses an already-loaded DLL of the same name, so the stray file is
-never picked up. It runs from a PyInstaller runtime hook, before Qt is imported.
+never picked up. It runs silently from a PyInstaller runtime hook, before Qt is imported.
 """
 import os
 import sys

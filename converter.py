@@ -310,9 +310,6 @@ class FileConverter(QWidget):
         self.log_viewer.setReadOnly(True)
         self.log_viewer.setPlainText(f"Smart Engine v{APP_VERSION} Ready.\n"
                                      "Drop TXT / PDF / EPUB files or folders anywhere on this window.")
-        if dll_guard.pinned:
-            self.log("Ignored stray DLLs next to the program (using the genuine ones instead): "
-                     + ", ".join(name for name, _ in dll_guard.pinned))
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setTextVisible(False)
