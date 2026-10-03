@@ -291,7 +291,7 @@ class TitleListRule:
 RULE_NUMERIC = Rule("00 Prologue / 1 / 01",
                     r"^(?P<n>\d{1,5})(?:\.?\s+(?P<t>\S.{0,60}))?$", sequential=True)
 RULE_KOREAN = Rule("N화 (Korean)",
-                   r"^(?:제\s*)?(?P<n>\d{1,6})\s*화\.?(?:\s+(?P<t>.{1,100}))?$")
+                   r"^[#＃]?\s*(?:제\s*)?(?P<n>\d{1,6})\s*화\.?(?:\s+(?P<t>.{1,100}))?$")
 RULE_HASH = Rule("#NNN.", r"^#\s*(?P<n>\d{1,6})\.?(?:\s+(?P<t>.{1,100}))?$")
 
 # Story sections that are chapters of their own even without a number.
@@ -304,6 +304,9 @@ _AUTHOR_NOTE = re.compile(
     r"|author'?s?\s*notes?|a\s*/\s*n|afterword|translator'?s?\s*notes?|t\s*/\s*n"
     r"|作者的话|作者有话说|後書き|あとがき)\s*[\]\)>】〉]?(?:\s*[:.\-–—]\s*.{0,40}|\s*\d{1,4})?$",
     re.IGNORECASE)
+
+
+_SIDE_STORY = re.compile(r"외전|번외|番外|side\s*stor(?:y|ies)|extra\s*chapter", re.IGNORECASE)
 
 
 def _is_special(heading: str) -> bool:
@@ -598,14 +601,35 @@ class SmartRule:
         titleish = lambda i: (_titleish(lines, i) and not mask[i]
                               and not _AUTHOR_NOTE.match(lines[i].strip()))
         consumed = set()
+        # A heading directly followed by another heading for the same chapter, e.g.
+        #   < 천마를 삼켰다 외전 1화 >
+        #   1화 신들의 전쟁
+        # is one heading: the marker plus the second line's title.
+        for i in sorted(hits):
+            if i not in hits:
+                continue
+            j = _next_nonblank(lines, i)
+            if j is None or j not in hits:
+                continue
+            a, b = hits[i], hits[j]
+            if a[1] is not None and b[1] is not None and a[1] != b[1]:
+                continue
+            marker = re.sub(r"^[<\[\(【〈《]\s*|\s*[>\]\)】〉》]$", "", a[3])
+            title = b[2] or b[3]
+            hits[i] = (i, a[1] if a[1] is not None else b[1], title, f"{marker} {title}".strip(), b[4])
+            del hits[j]
+            consumed.add(j)
         for i in sorted(hits):
             h = hits[i]
-            if h[1] is None or h[2]:
+            if h[1] is None or re.search(r"\w", h[2]):  # "title" may be just a closing ">"
                 continue
             j = _next_nonblank(lines, i)
             if j is not None and j not in hits and titleish(j):
                 sub = lines[j].strip()
-                hits[i] = (i, h[1], sub, f"{h[3]} {sub}", j + 1)
+                # "외전 1화" + "1화 신들의 전쟁" -> don't repeat the number in the title
+                sub = re.sub(rf"^[#＃]?\s*0*{h[1]}\s*[{_COUNTERS}]?\.?\s+", "", sub) or sub
+                marker = re.sub(r"^[<\[\(【〈《]\s*|\s*[>\]\)】〉》]$", "", h[3])
+                hits[i] = (i, h[1], sub, f"{marker} {sub}", j + 1)
                 consumed.add(j)
 
         cum = [0]
@@ -655,7 +679,11 @@ class SmartRule:
         # Number every chapter: explicit numbers win, the rest continue the count.
         out, counter = [], 0
         for i, number, subtitle, heading, body in ordered:
-            if number is not None:
+            if _SIDE_STORY.search(heading):
+                # Side stories count separately (외전 1, 2 …) and must not restart the
+                # main chapter numbers; their headings keep their own numbering.
+                number = None
+            elif number is not None:
                 counter = number
             elif not _is_special(heading):
                 counter += 1
@@ -710,6 +738,51 @@ def split_text(text: str, rule, split_notes: bool = False) -> list[Chapter]:
                 heading = f"Chapter {seq}"
         chapters.append(Chapter(seq, number, heading, subtitle, lines[body_start:end]))
     return chapters
+
+
+_WRAPPED = re.compile(r"^[<〈《【]\s*(.+?)\s*[>〉》】]$")
+
+
+def _unwrap(heading: str) -> str:
+    """'< 천마를 삼켰다 외전 37화 >' -> '천마를 삼켰다 외전 37화'."""
+    m = _WRAPPED.match(heading.strip())
+    return m.group(1) if m else heading.strip()
+
+
+def tidy_chapters(chapters: list[Chapter]) -> list[Chapter]:
+    """Merge headings that have nothing under them into the chapter that follows.
+
+    A marker line and the chapter's title can end up as two chapters — the first one
+    empty (e.g. "< 외전 32화 >" then "32화 신살검", or an EPUB with a heading-only
+    page). They become one chapter, "외전 32화 신살검", without repeating the number.
+    Headings wrapped in < > are unwrapped.
+    """
+    out: list[Chapter] = []
+    pending: Chapter | None = None
+    for i, c in enumerate(chapters):
+        heading = _unwrap(c.heading)
+        number = None if _SIDE_STORY.search(heading) else c.number  # 외전 count separately
+        c = Chapter(c.index, number, heading=heading, subtitle=c.subtitle, lines=c.lines)
+        if pending is not None:
+            marker = pending.heading
+            title = c.subtitle or c.heading
+            m = re.search(rf"(\d+)\s*[{_COUNTERS}]?\s*$", marker)
+            if m:  # "… 32화" + "32화 신살검" -> "… 32화 신살검"
+                title = re.sub(rf"^[#＃]?\s*0*{int(m.group(1))}\s*[{_COUNTERS}]?\.?\s*", "", title) or title
+            heading = f"{marker} {title}".strip()
+            number = pending.number if pending.number is not None else c.number
+            if _SIDE_STORY.search(heading):
+                number = None
+            c = Chapter(pending.index, number, heading=heading, subtitle=title, lines=c.lines)
+            pending = None
+        empty = not any(ln.strip() for ln in c.lines)
+        if empty and c.index > 0 and i + 1 < len(chapters):
+            pending = c
+            continue
+        out.append(c)
+    for n, c in enumerate([c for c in out if c.index > 0], 1):
+        c.index = n
+    return out
 
 
 def apply_spacing(lines: list[str], mode: str) -> list[str]:
@@ -1058,6 +1131,7 @@ class Settings:
     split_notes: bool = False      # author's notes become their own chapter
     number_titles: bool = False    # prefix titles with their position: "1. ", "2. " …
     number_start: int = 1          # first number used by number_titles (0 or 1 …)
+    number_files: bool = False     # separate-chapter file names get a "001 " prefix
     subfolders: bool = True        # each input's output in its own <name>_Converted folder
 
     def output_options(self) -> OutputOptions:
@@ -1191,6 +1265,8 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
             log(f"{tag} No chapter headings matched; keeping the source structure "
                 f"({len(chapters)} section(s)). Paste an example heading to split it.")
 
+    chapters = tidy_chapters(chapters)
+    real = [c for c in chapters if c.index > 0]
     rows = [(c, c.title(settings.template), apply_spacing(c.lines, settings.spacing))
             for c in chapters]
     if settings.number_titles:
@@ -1203,13 +1279,25 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
     # Chapter files from several inputs can share a folder when subfolders are off.
     chapter_prefix = "" if settings.subfolders else f"{base} "
     opts = settings.output_options()
-    # Name files by chapter number when every chapter has a distinct one, so a chapter
-    # missing from the source doesn't shift every later file name.
-    real_nums = [c.number for c in chapters if c.index > 0]
-    by_number = None not in real_nums and len(set(real_nums)) == len(real_nums) and \
-        all(n > 0 for n in real_nums)
-    file_no = {id(c): (c.number if by_number and c.index > 0 else c.index) for c in chapters}
-    width = max(3, len(str(max(file_no.values(), default=0))))
+    # Separate-chapter files are named after their chapter titles. Number File Names adds
+    # a sortable prefix ("001 ", "002 " …) — the chapter number when every chapter has a
+    # distinct one (so a chapter missing from the source doesn't shift later names),
+    # otherwise the position. Titles that repeat get " (2)", " (3)" … so nothing is
+    # overwritten.
+    file_no, width = {}, 0
+    if settings.number_files:
+        real_nums = [c.number for c in chapters if c.index > 0]
+        by_number = None not in real_nums and len(set(real_nums)) == len(real_nums) and \
+            all(n > 0 for n in real_nums)
+        file_no = {id(c): (c.number if by_number and c.index > 0 else c.index) for c in chapters}
+        width = max(3, len(str(max(file_no.values(), default=0))))
+    file_names, used = {}, {}
+    for ch, title, _body in rows:
+        number = f"{file_no[id(ch)]:0{width}d} " if file_no else ""
+        name = f"{chapter_prefix}{number}{safe_filename(title)}"
+        key = name.lower()
+        used[key] = used.get(key, 0) + 1
+        file_names[id(ch)] = name if used[key] == 1 else f"{name} ({used[key]})"
     jobs: list[tuple[str, Callable[[], None]]] = []  # (output format, write job)
     for fmt in ("txt", "pdf", "epub"):
         if fmt not in settings.formats:
@@ -1228,8 +1316,7 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
             fmt_dir = out_dir / fmt.upper()
             fmt_dir.mkdir(exist_ok=True)
             for ch, title, body in rows:
-                target = fmt_dir / (f"{chapter_prefix}{file_no[id(ch)]:0{width}d} "
-                                    f"{safe_filename(title)}.{fmt}")
+                target = fmt_dir / f"{file_names[id(ch)]}.{fmt}"
                 jobs.append((fmt, lambda w=writer, t=target, ti=title, b=body:
                              w(t, ti, [(ti, b)], opts)))
     if "csv" in settings.formats:

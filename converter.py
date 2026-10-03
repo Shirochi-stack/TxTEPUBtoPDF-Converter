@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 import engine
 
 APP_NAME = "File Converter"
-APP_VERSION = "2.4"
+APP_VERSION = "2.5"
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 SETTINGS_FILE = APP_DIR / "config.json"
 SETTINGS_VERSION = 2
@@ -235,6 +235,13 @@ class FileConverter(QWidget):
         box = column(1, "File Mode:")
         self.file_mode = radios(box, "file_mode", [("merged", "One Merged File", ""),
                                                    ("separate", "Separate Chapters", "")], "merged")
+        self.number_files_check = QCheckBox("Number File Names (001, 002 …)")
+        self.number_files_check.setChecked(s.get("number_files", False))
+        self.number_files_check.setToolTip(
+            "Separate Chapters only: put a sortable number in front of each chapter file name,\n"
+            "e.g. \"001 1화 Title.txt\". Independent of Number Titles, which changes the titles.")
+        self.number_files_check.stateChanged.connect(self.on_option_changed)
+        box.addWidget(self.number_files_check)
         self.subfolders_check = QCheckBox("Subfolder per Input File")
         self.subfolders_check.setChecked(s.get("subfolders", True))
         self.subfolders_check.setToolTip(
@@ -471,6 +478,7 @@ class FileConverter(QWidget):
             "split_notes": self.split_notes_check.isChecked(),
             "number_titles": self.number_titles_check.isChecked(),
             "number_start": self.number_start_spin.value(),
+            "number_files": self.number_files_check.isChecked(),
             "subfolders": self.subfolders_check.isChecked(),
         }
         try:
@@ -514,6 +522,7 @@ class FileConverter(QWidget):
         self.toc_start_page_spin.setEnabled(pdf)
         self.prefix_entry.setEnabled(self.prefix_check.isChecked())
         self.number_start_spin.setEnabled(self.number_titles_check.isChecked())
+        self.number_files_check.setEnabled(self._value(self.file_mode) == "separate")
 
     def build_settings(self):
         return engine.Settings(
@@ -533,6 +542,7 @@ class FileConverter(QWidget):
             split_notes=self.split_notes_check.isChecked(),
             number_titles=self.number_titles_check.isChecked(),
             number_start=self.number_start_spin.value(),
+            number_files=self.number_files_check.isChecked(),
             subfolders=self.subfolders_check.isChecked(),
         )
 
@@ -762,6 +772,8 @@ def run_cli(argv):
                         help="make author's notes (e.g. Author's Note) separate chapters")
     parser.add_argument("--number-start", type=int, default=1,
                         help="first number for --number-titles (e.g. 0 or 1; default 1)")
+    parser.add_argument("--number-files", action="store_true",
+                        help="with --separate: put 001, 002 ... in front of chapter file names")
     parser.add_argument("--no-subfolders", action="store_true",
                         help="put all output straight into the Converted folder (no per-input subfolders)")
     parser.add_argument("--number-titles", action="store_true",
@@ -784,7 +796,7 @@ def run_cli(argv):
         spacing=args.spacing, mode=args.mode, example=args.example, template=args.prefix,
         toc=args.toc, keep_layout=args.keep_layout, workers=args.threads,
         split_notes=args.split_notes, number_titles=args.number_titles,
-        number_start=args.number_start,
+        number_start=args.number_start, number_files=args.number_files,
         subfolders=not args.no_subfolders)
     results = engine.process_batch(engine.collect_files(args.paths), settings, log, lambda f: None)
     if args.log:

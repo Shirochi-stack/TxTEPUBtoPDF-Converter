@@ -11,7 +11,7 @@ Get `TxTEPUBtoPDF-Converter.v<version>.exe` from the [latest release](https://gi
 - **Any-to-any conversion** – TXT / PDF / EPUB in, TXT / PDF / EPUB / CSV (master sheet) out. Tick several output formats to get them all in one run.
 - **Batch + drag & drop** – select many files, add a folder, or drop files/folders anywhere on the window.
 - **Parallel threads** – files are processed in parallel. The default is 2 threads; you can raise it up to your PC's logical core count, which is shown next to the setting (e.g. `/ 16 logical cores`).
-- **File mode** – one merged file per source, or one file per chapter.
+- **File mode** – one merged file per source, or one file per chapter (optionally with numbered file names).
 - **Chapter detection** – see [Chapter detection](#chapter-detection) below.
 - **Spacing** – standard, double space, or remove blank lines.
 - **Chapter prefix/suffix** – rename headings with a template such as `Ch.{n}` or `{n}화`.
@@ -76,7 +76,7 @@ Pick a **Chapter Format Mode**:
 | **Smart Auto** | Headings like the examples you paste, one per line (`Chapter 12: Title`, `2화. 제목`, `第十二章`, `[외전]` …). Leave the box empty to auto-detect common styles. |
 | **No Splitting** | Nothing – a plain conversion. EPUBs keep their own chapters. |
 | **00 Prologue / 1 / 01** | Lines that are a bare number, optionally followed by a title. Only numbers that rise in sequence count. |
-| **1화. / 2화.** | Korean `N화` headings (`1화`, `2화. 제목`, `제3화`). |
+| **1화. / 2화.** | Korean `N화` headings (`1화`, `#1화 제목`, `2화. 제목`, `제3화`). |
 | **#001. / #002.** | Hash-numbered headings. |
 | **Naver Series link** | The official episode titles fetched from a `series.naver.com` link (`productNo=…`). Tags such as (삽화) or [수정] are cleaned up. |
 
@@ -97,13 +97,23 @@ Web novels often change how chapter headings look partway through. In all modes 
 - **Title-only chapters** – where numbered headings stop, chapters headed only by a title are found and numbered in sequence:
   - title series such as `EP.6 별이 빛나는 밤에`, `EP.6 별이 빛나는 밤에 2`, `EP.6 별이 빛나는 밤에 3`
   - single titles such as `계약` or `LET'S RIDE!`, picked when they sit about one chapter's length apart
+- **Marker + title headings** – a marker line directly followed by the chapter's title line is one heading:
+
+  ```
+  < 천마를 삼켰다 외전 1화 >
+
+  1화 신들의 전쟁
+  ```
+
+  becomes `천마를 삼켰다 외전 1화 신들의 전쟁`.
+- **Side stories keep their own numbers** – chapters marked `외전`, `번외` or `Side Story` are numbered separately (외전 1, 2 …), so they don't restart or shift the main chapter numbers. With a `Ch.{n}` template they keep their original heading.
 - **Author's notes stay with their chapter** – notices such as `작가의 말`, `[작가의 말]`, `후기`, `공지`, `Author's Note`, `A/N` or `Afterword` remain at the end of the chapter they follow. Tick **Split Author's Notes Into Own Chapters** (or use `--split-notes`) to make each one a separate chapter; either way they don't affect chapter numbering. Prologue, epilogue and side stories (`프롤로그`, `에필로그`, `외전`, `번외` …) are still split as chapters.
 - **Missing chapters** – where a number is skipped (137 → 139), the app looks for an unlabelled chapter in between. If there is none, the log names the chapter that is not in the file instead of renumbering everything after it.
 - **Noise is ignored** – scene breaks (`* * *`), inserted blocks (`//* … *//`), comment threads, sound effects and table-of-contents pages are not treated as chapter headings.
 
 A book whose chapters are numbered 1, 2, 3… with no gaps is never split further, even when some chapters are long.
 
-In **Separate Chapters** mode, files are named by chapter number (`137 …`, `139 …`). A chapter missing from the source therefore doesn't shift the names of the files after it.
+In **Separate Chapters** mode, each file is named after its chapter title (`#199화 신의 진노(3).txt`); a repeated title gets `(2)`, `(3)` … instead of overwriting. Tick **Number File Names** (`--number-files`) to add a sortable prefix (`199 #199화 신의 진노(3).txt`). It uses the chapter number when every chapter has its own, so a chapter missing from the source doesn't shift later file names. This is separate from **Number Titles**, which changes the titles themselves.
 
 ## Run from source
 
@@ -125,6 +135,7 @@ Headless batch mode: `python converter.py --cli [options] files-or-folders…`. 
 | `--example "…"` | Example heading for auto mode. |
 | `--prefix "Ch.{n}"` | Chapter title template. |
 | `--number-titles`, `--number-start N` | Number titles, starting at `N` (default 1). |
+| `--number-files` | With `--separate`: put `001`, `002` … in front of chapter file names. |
 | `--split-notes` | Make author's notes separate chapters. |
 | `--no-subfolders` | Put all output straight into `Converted`. |
 | `--toc`, `--keep-layout` | PDF table of contents; layout-preserving EPUB → PDF. |
@@ -133,6 +144,6 @@ Headless batch mode: `python converter.py --cli [options] files-or-folders…`. 
 
 ## Build
 
-`build.bat` produces `dist\TxTEPUBtoPDF-Converter.v<version>.exe` (e.g. `TxTEPUBtoPDF-Converter.v2.4.exe`) from `converter.spec`. The version comes from `APP_VERSION` in `converter.py`, and the publisher details (shirochi-stack) from `version_info.txt`.
+`build.bat` produces `dist\TxTEPUBtoPDF-Converter.v<version>.exe` (e.g. `TxTEPUBtoPDF-Converter.v2.5.exe`) from `converter.spec`. The version comes from `APP_VERSION` in `converter.py`, and the publisher details (shirochi-stack) from `version_info.txt`.
 
 The layout-preserving EPUB → PDF option needs the GTK runtime (MSYS2 `mingw64`); without it the app falls back to its built-in text PDF writer.
