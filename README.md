@@ -39,7 +39,8 @@ Novels\
 - **Subfolder per Input File** (on by default) controls the folders inside `Converted`. Untick it (or use `--no-subfolders`) to put every output file straight into `Converted\`. Separate-chapter files then go into per-format folders (`Converted\TXT\`, `Converted\PDF\` …) with the source name in front of each file name.
 - Inputs in one folder that share a name (`book.txt` + `book.epub`) get their extension added (`book_txt`, `book_epub`) so their outputs can't overwrite each other.
 - When you add a folder, anything already inside its `Converted` folder is skipped, so earlier results aren't converted again.
-- Source files are never modified.
+- **Re-running replaces the previous output.** Before writing, the app removes what the last run produced for that input, so changing a chapter pattern or numbering option doesn't leave stale chapter files behind. In a per-input subfolder that means its old TXT/PDF/EPUB/CSV outputs and chapter folders. In the shared `Converted` folder (Subfolder per Input File off) only the files that input produced are removed, tracked in `Converted\.converted_files.json`. Other files you put there are left alone.
+- Source files are never modified or deleted.
 
 ### When a batch finishes
 
@@ -47,9 +48,9 @@ The **Done** dialog lists what went in separately from what came out:
 
 ```
 Input files: 3 converted, 1 failed
-    • alpha.txt  —  13 chapters
-    • book.epub  —  291 chapters
-    • notes.pdf  —  4 chapters
+    • alpha.txt  —  13 chapters  →  open output
+    • book.epub  —  291 chapters  →  open output
+    • notes.pdf  —  4 chapters  →  open output
     ✗ empty.txt  —  failed (see the log)
 
 Output files: 924 written
@@ -61,9 +62,9 @@ Output folder:
 C:\…\Novels\Converted
 ```
 
-- **Input files** are listed in the same order as your file list, with their chapter counts. Failed or cancelled files are marked; a long batch ends with "… and N more".
+- **Input files** are listed in the same order as your file list, with their chapter counts and an **open output** link to each file's own output folder (up to 10; a longer batch ends with "… and N more"). Failed or cancelled files are marked.
 - **Output files** shows the total and a count per format. Only files that were actually written are counted.
-- **Open Output Folder** opens the main `Converted` folder. If the inputs came from several folders, each one has its own `Converted` folder and the button opens all of them.
+- **Open Output Folder** opens the file's own folder when you converted one file, and the main `Converted` folder when you converted several. If the inputs came from several folders, each has its own `Converted` folder and the button opens all of them. The folder path under **Output folder** is a link too.
 
 The log gets the same summary on one line.
 
@@ -73,7 +74,7 @@ Pick a **Chapter Format Mode**:
 
 | Mode | What it splits on |
 |---|---|
-| **Smart Auto** | Headings like the examples you paste, one per line (`Chapter 12: Title`, `2화. 제목`, `第十二章`, `[외전]` …). Leave the box empty to auto-detect common styles. |
+| **Smart Auto** | Headings like the examples you paste, one per line (`Chapter 12: Title`, `2화. 제목`, `第十二章`, `[외전]` …). Leave the box empty to auto-detect common styles. Tick **Also use built-in markers** (`--with-defaults`) to use the auto-detected styles together with your examples. |
 | **No Splitting** | Nothing – a plain conversion. EPUBs keep their own chapters. |
 | **00 Prologue / 1 / 01** | Lines that are a bare number, optionally followed by a title. Only numbers that rise in sequence count. |
 | **1화. / 2화.** | Korean `N화` headings (`1화`, `#1화 제목`, `2화. 제목`, `제3화`). |
@@ -109,9 +110,26 @@ Web novels often change how chapter headings look partway through. In all modes 
 - **Side stories keep their own numbers** – chapters marked `외전`, `번외` or `Side Story` are numbered separately (외전 1, 2 …), so they don't restart or shift the main chapter numbers. With a `Ch.{n}` template they keep their original heading.
 - **Author's notes stay with their chapter** – notices such as `작가의 말`, `[작가의 말]`, `후기`, `공지`, `Author's Note`, `A/N` or `Afterword` remain at the end of the chapter they follow. Tick **Split Author's Notes Into Own Chapters** (or use `--split-notes`) to make each one a separate chapter; either way they don't affect chapter numbering. Prologue, epilogue and side stories (`프롤로그`, `에필로그`, `외전`, `번외` …) are still split as chapters.
 - **Missing chapters** – where a number is skipped (137 → 139), the app looks for an unlabelled chapter in between. If there is none, the log names the chapter that is not in the file instead of renumbering everything after it.
+- **Bullet lists stay text** – numbered list items on neighbouring lines (`1.` then `2.`, `2)` then `3)`, `①` then `②`) are bullet points, not chapters. For example, a system window inside chapter 1:
+
+  ```
+  [챕터2 탈출]
+
+  1. 탈출구를 찾으세요(힌트, 푸른 빛).
+
+  2. 위험에 대비하세요.
+
+  3. 탈출하세요.
+  ```
+
+  stays in chapter 1's text, and the real `2. …` / `3. …` headings further on are used as chapters 2 and 3.
 - **Noise is ignored** – scene breaks (`* * *`), inserted blocks (`//* … *//`), comment threads, sound effects and table-of-contents pages are not treated as chapter headings.
 
 A book whose chapters are numbered 1, 2, 3… with no gaps is never split further, even when some chapters are long.
+
+### Ignore outlier splits
+
+Optional, off by default (in every mode). A chapter far shorter than the book's typical chapter usually means a heading matched something that isn't really a chapter start, e.g. a later episode number quoted in the text. Tick **Ignore outlier splits** and set the slider (5–90 %, default 25 %). Any chapter with less text than that share of the median chapter is merged back into the chapter before it, and its heading line stays there as ordinary text. Prologues, epilogues, side stories and author's notes are never merged away. The log lists which markers were ignored. Command line: `--outlier-percent N`.
 
 In **Separate Chapters** mode, each file is named after its chapter title (`#199화 신의 진노(3).txt`); a repeated title gets `(2)`, `(3)` … instead of overwriting. Tick **Number File Names** (`--number-files`) to add a sortable prefix (`199 #199화 신의 진노(3).txt`). It uses the chapter number when every chapter has its own, so a chapter missing from the source doesn't shift later file names. This is separate from **Number Titles**, which changes the titles themselves.
 
@@ -137,6 +155,8 @@ Headless batch mode: `python converter.py --cli [options] files-or-folders…`. 
 | `--number-titles`, `--number-start N` | Number titles, starting at `N` (default 1). |
 | `--number-files` | With `--separate`: put `001`, `002` … in front of chapter file names. |
 | `--split-notes` | Make author's notes separate chapters. |
+| `--with-defaults` | Use the built-in heading styles together with `--example`. |
+| `--outlier-percent N` | Ignore splits whose chapter is shorter than N % of a typical chapter. |
 | `--no-subfolders` | Put all output straight into `Converted`. |
 | `--toc`, `--keep-layout` | PDF table of contents; layout-preserving EPUB → PDF. |
 | `--threads N` | Parallel threads, 1 up to your logical core count (default 2). |
@@ -144,6 +164,6 @@ Headless batch mode: `python converter.py --cli [options] files-or-folders…`. 
 
 ## Build
 
-`build.bat` produces `dist\TxTEPUBtoPDF-Converter.v<version>.exe` (e.g. `TxTEPUBtoPDF-Converter.v2.5.exe`) from `converter.spec`. The version comes from `APP_VERSION` in `converter.py`, and the publisher details (shirochi-stack) from `version_info.txt`.
+`build.bat` produces `dist\TxTEPUBtoPDF-Converter.v<version>.exe` (e.g. `TxTEPUBtoPDF-Converter.v2.6.exe`) from `converter.spec`. The version comes from `APP_VERSION` in `converter.py`, and the publisher details (shirochi-stack) from `version_info.txt`.
 
 The layout-preserving EPUB → PDF option needs the GTK runtime (MSYS2 `mingw64`); without it the app falls back to its built-in text PDF writer.

@@ -1,5 +1,6 @@
 import json
 import os
+from html import escape
 import sys
 import tempfile
 import threading
@@ -22,14 +23,14 @@ from PySide6.QtGui import (QColor, QDesktopServices, QKeySequence, QPainter, QPa
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox,
                                QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QMessageBox, QPlainTextEdit,
-                               QProgressBar, QPushButton,
+                               QProgressBar, QPushButton, QSlider,
                                QRadioButton, QSpinBox, QStackedWidget, QTextEdit, QVBoxLayout,
                                QWidget)
 
 import engine
 
 APP_NAME = "File Converter"
-APP_VERSION = "2.5"
+APP_VERSION = "2.6"
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 SETTINGS_FILE = APP_DIR / "config.json"
 SETTINGS_VERSION = 2
@@ -78,6 +79,12 @@ QCheckBox::indicator:checked:disabled { background: #3d5366; border-color: #3d53
 QRadioButton#blue { color: #3b9ee0; }
 QRadioButton#red { color: #e74c3c; }
 QCheckBox#accent { color: #f1c40f; }
+QSlider::groove:horizontal { height: 6px; background: #3a3a3a; border-radius: 3px; }
+QSlider::sub-page:horizontal { background: #1f6aa5; border-radius: 3px; }
+QSlider::handle:horizontal { background: #3b8ed0; width: 14px; margin: -5px 0; border-radius: 7px; }
+QSlider::sub-page:horizontal:disabled { background: #3d5366; }
+QSlider::handle:horizontal:disabled { background: #5a5a5a; }
+QFrame#side QSlider, QFrame#side QCheckBox { background: transparent; }
 QProgressBar { background: #2f2f2f; border: none; border-radius: 4px; height: 9px; }
 QProgressBar::chunk { background: #1f8fe0; border-radius: 4px; }
 """
@@ -92,7 +99,8 @@ def apply_theme(app):
                         (QPalette.Text, "#e6e6e6"), (QPalette.Button, "#3a3a3a"),
                         (QPalette.ButtonText, "#e6e6e6"), (QPalette.ToolTipBase, "#2a2a2a"),
                         (QPalette.ToolTipText, "#e6e6e6"), (QPalette.PlaceholderText, "#8a8a8a"),
-                        (QPalette.Highlight, "#1f6aa5"), (QPalette.HighlightedText, "#ffffff")):
+                        (QPalette.Highlight, "#1f6aa5"), (QPalette.HighlightedText, "#ffffff"),
+                        (QPalette.Link, "#5aa9e6"), (QPalette.LinkVisited, "#8fb8e8")):
         palette.setColor(role, QColor(color))
     for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
         palette.setColor(QPalette.Disabled, role, QColor("#6f6f6f"))
@@ -330,7 +338,7 @@ class FileConverter(QWidget):
         self.side_stack = QStackedWidget()
         side_layout.addWidget(self.side_stack)
 
-        def side_page(label, label_name, placeholder, hint, key, multiline=False):
+        def side_page(label, label_name, placeholder, hint, key, multiline=False, extra=None):
             page = QWidget()
             lay = QVBoxLayout(page)
             lay.setSpacing(10)
@@ -350,10 +358,19 @@ class FileConverter(QWidget):
             note.setWordWrap(True)
             lay.addWidget(head)
             lay.addWidget(entry)
+            if extra is not None:
+                lay.addWidget(extra)
             lay.addWidget(note)
             lay.addStretch()
             self.side_stack.addWidget(page)
             return entry
+
+        self.with_defaults_check = QCheckBox("Also use built-in markers")
+        self.with_defaults_check.setChecked(s.get("example_with_defaults", False))
+        self.with_defaults_check.setToolTip(
+            "Use the heading styles detected automatically (1화, #1화, Chapter 1, 第1章 …)\n"
+            "together with the examples you pasted, instead of only your examples.")
+        self.with_defaults_check.stateChanged.connect(self.on_option_changed)
 
         self.example_entry = side_page(
             "Paste Examples Here:", "accent", "e.g.\n2화. 내가 허락했어\n사이버펑크 협객전 127화",
@@ -361,7 +378,7 @@ class FileConverter(QWidget):
             "add one for each style the file uses.\n\n"
             "Leave it empty to auto-detect. Either way, headings with a title prefix, "
             "two-line headings and title-only chapters are picked up automatically.",
-            "example", multiline=True)
+            "example", multiline=True, extra=self.with_defaults_check)
         self.naver_entry = side_page(
             "Naver Series URL:", "naver", "https://series.naver.com/novel/detail.series?productNo=…",
             "Fetches the official episode list and splits on those titles. "
@@ -374,6 +391,29 @@ class FileConverter(QWidget):
         info_layout.addWidget(self.side_info)
         info_layout.addStretch()
         self.side_stack.addWidget(info)
+
+        # Outlier exclusion applies to every chapter mode, so it sits below the pages.
+        outlier_box = QVBoxLayout()
+        outlier_box.setSpacing(4)
+        self.outlier_check = QCheckBox("Ignore outlier splits", objectName="accent")
+        self.outlier_check.setChecked(s.get("outlier_filter", False))
+        self.outlier_check.setToolTip(
+            "A chapter far shorter than the book's typical chapter is treated as a false split:\n"
+            "its heading line goes back into the previous chapter as ordinary text.\n"
+            "Prologues, epilogues, side stories and author's notes are never merged away.")
+        self.outlier_check.stateChanged.connect(self.on_option_changed)
+        self.outlier_slider = QSlider(Qt.Horizontal)
+        self.outlier_slider.setRange(5, 90)
+        self.outlier_slider.setSingleStep(5)
+        self.outlier_slider.setPageStep(10)
+        self.outlier_slider.setValue(s.get("outlier_percent", 25))
+        self.outlier_slider.valueChanged.connect(self.on_option_changed)
+        self.outlier_label = QLabel(objectName="hint")
+        self.outlier_label.setWordWrap(True)
+        outlier_box.addWidget(self.outlier_check)
+        outlier_box.addWidget(self.outlier_slider)
+        outlier_box.addWidget(self.outlier_label)
+        side_layout.addLayout(outlier_box)
         middle.addWidget(side)
         root.addLayout(middle, 1)
 
@@ -479,6 +519,9 @@ class FileConverter(QWidget):
             "number_titles": self.number_titles_check.isChecked(),
             "number_start": self.number_start_spin.value(),
             "number_files": self.number_files_check.isChecked(),
+            "example_with_defaults": self.with_defaults_check.isChecked(),
+            "outlier_filter": self.outlier_check.isChecked(),
+            "outlier_percent": self.outlier_slider.value(),
             "subfolders": self.subfolders_check.isChecked(),
         }
         try:
@@ -523,6 +566,10 @@ class FileConverter(QWidget):
         self.prefix_entry.setEnabled(self.prefix_check.isChecked())
         self.number_start_spin.setEnabled(self.number_titles_check.isChecked())
         self.number_files_check.setEnabled(self._value(self.file_mode) == "separate")
+        self.outlier_slider.setEnabled(self.outlier_check.isChecked())
+        self.outlier_label.setEnabled(self.outlier_check.isChecked())
+        self.outlier_label.setText(f"Merge chapters shorter than {self.outlier_slider.value()}% "
+                                   "of a typical chapter back into the one before.")
 
     def build_settings(self):
         return engine.Settings(
@@ -543,6 +590,9 @@ class FileConverter(QWidget):
             number_titles=self.number_titles_check.isChecked(),
             number_start=self.number_start_spin.value(),
             number_files=self.number_files_check.isChecked(),
+            example_with_defaults=self.with_defaults_check.isChecked(),
+            outlier_filter=self.outlier_check.isChecked(),
+            outlier_percent=self.outlier_slider.value(),
             subfolders=self.subfolders_check.isChecked(),
         )
 
@@ -669,22 +719,40 @@ class FileConverter(QWidget):
         failed = [r for r in results if "error" in r and r["error"] != "cancelled"]
         cancelled = len(results) - len(ok) - len(failed)
         self.progress_bar.setValue(1000)
-        summary = self.summarize(ok, failed, cancelled)
-        roots = list(dict.fromkeys(str(r["root"]) for r in ok))  # one per source folder
-        self.log(" | ".join(line.strip() for line in summary.splitlines() if line.strip()))
+        self.log(" | ".join(line.strip() for line in
+                            self.summarize(ok, failed, cancelled).splitlines() if line.strip()))
         box = QMessageBox(QMessageBox.Warning if failed else QMessageBox.Information,
-                          "Done", summary, QMessageBox.Ok, self)
-        label = "Open Output Folder" if len(roots) <= 1 else "Open Output Folders"
+                          "Done", self.summarize(ok, failed, cancelled, html=True), QMessageBox.Ok, self)
+        box.setTextFormat(Qt.RichText)
+        text_label = box.findChild(QLabel, "qt_msgbox_label")
+        if text_label is not None:  # make the folder links clickable
+            text_label.setOpenExternalLinks(True)
+            text_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        # One input: open its own folder. Several: the main Converted folder(s).
+        targets = ([str(ok[0]["out_dir"])] if len(ok) == 1
+                   else list(dict.fromkeys(str(r["root"]) for r in ok)))
+        label = "Open Output Folder" if len(targets) <= 1 else "Open Output Folders"
         open_button = box.addButton(label, QMessageBox.ActionRole) if ok else None
         box.exec()
         if open_button is not None and box.clickedButton() is open_button:
-            for root in roots:  # usually one; one per source folder if inputs came from several
-                QDesktopServices.openUrl(QUrl.fromLocalFile(root))
+            for target in targets:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(target))
 
     @staticmethod
-    def summarize(ok, failed, cancelled, max_listed=8):
-        """Done-dialog text: what went in (input files) and what came out (per format)."""
+    def summarize(ok, failed, cancelled, max_listed=10, html=False):
+        """Done-dialog text: what went in (input files) and what came out (per format).
+
+        With ``html`` each input gets a clickable link to its own output folder.
+        """
         plural = lambda n, word: f"{n} {word}{'' if n == 1 else 's'}"
+        esc = escape if html else (lambda t: t)
+        indent = "&nbsp;" * 4 if html else " " * 4
+
+        def link(path, text):
+            if not html:
+                return text
+            return f'<a href="{QUrl.fromLocalFile(str(path)).toString()}">{esc(text)}</a>'
+
         # Results arrive in finishing order; list them the way the file list shows them.
         ok = sorted(ok, key=lambda r: engine.natural_key(r["file"]))
         failed = sorted(failed, key=lambda r: engine.natural_key(r["file"]))
@@ -692,11 +760,14 @@ class FileConverter(QWidget):
                  + (f", {len(failed)} failed" if failed else "")
                  + (f", {cancelled} cancelled" if cancelled else "")]
         for r in ok[:max_listed]:
-            lines.append(f"    • {r['file'].name}  —  {plural(r['chapters'], 'chapter')}")
+            line = f"{indent}• {esc(r['file'].name)}  —  {plural(r['chapters'], 'chapter')}"
+            if html:
+                line += f"  →  {link(r['out_dir'], 'open output')}"
+            lines.append(line)
         if len(ok) > max_listed:
-            lines.append(f"    • … and {len(ok) - max_listed} more")
+            lines.append(f"{indent}• … and {len(ok) - max_listed} more")
         for r in failed[:max_listed]:
-            lines.append(f"    ✗ {Path(r['file']).name}  —  failed (see the log)")
+            lines.append(f"{indent}✗ {esc(Path(r['file']).name)}  —  failed (see the log)")
 
         by_format: dict[str, int] = {}
         for r in ok:
@@ -706,12 +777,14 @@ class FileConverter(QWidget):
         lines += ["", f"Output files: {total} written"]
         for fmt in ("txt", "pdf", "epub", "csv"):
             if fmt in by_format:
-                lines.append(f"    • {fmt.upper()}: {plural(by_format[fmt], 'file')}")
+                lines.append(f"{indent}• {fmt.upper()}: {plural(by_format[fmt], 'file')}")
 
-        roots = list(dict.fromkeys(str(r["root"]) for r in ok))
-        if roots:
-            lines += ["", "Output folder:" if len(roots) == 1 else "Output folders:"] + roots
-        return "\n".join(lines)
+        folders = ([r["out_dir"] for r in ok] if len(ok) == 1
+                   else list(dict.fromkeys(r["root"] for r in ok)))
+        if folders:
+            lines += ["", "Output folder:" if len(folders) == 1 else "Output folders:"]
+            lines += [link(f, str(f)) for f in folders]
+        return "<br>".join(lines) if html else "\n".join(lines)
 
     def on_merge(self):
         self.save_settings()
@@ -774,6 +847,10 @@ def run_cli(argv):
                         help="first number for --number-titles (e.g. 0 or 1; default 1)")
     parser.add_argument("--number-files", action="store_true",
                         help="with --separate: put 001, 002 ... in front of chapter file names")
+    parser.add_argument("--with-defaults", action="store_true",
+                        help="use the built-in heading styles together with --example")
+    parser.add_argument("--outlier-percent", type=int, default=None, metavar="N",
+                        help="ignore chapter splits whose chapter is shorter than N%% of a typical one")
     parser.add_argument("--no-subfolders", action="store_true",
                         help="put all output straight into the Converted folder (no per-input subfolders)")
     parser.add_argument("--number-titles", action="store_true",
@@ -797,6 +874,9 @@ def run_cli(argv):
         toc=args.toc, keep_layout=args.keep_layout, workers=args.threads,
         split_notes=args.split_notes, number_titles=args.number_titles,
         number_start=args.number_start, number_files=args.number_files,
+        example_with_defaults=args.with_defaults,
+        outlier_filter=args.outlier_percent is not None,
+        outlier_percent=args.outlier_percent or 25,
         subfolders=not args.no_subfolders)
     results = engine.process_batch(engine.collect_files(args.paths), settings, log, lambda f: None)
     if args.log:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import html
+import json
 import os
 import posixpath
 import re
@@ -435,6 +436,8 @@ def find_headings(lines: list[str], rule, split_notes: bool = False) -> list[tup
             hits.append((i, r[0], r[1], r[2] if len(r) > 2 else s, i + 1))
         elif _SPECIAL.match(s) or (split_notes and _AUTHOR_NOTE.match(s)):
             hits.append((i, None, "", s, i + 1))
+    # Bullet points ("1. 건물에 들어가세요." / "2. 필요한 물건을 챙기세요.") stay body text.
+    hits = [h for h in hits if not _in_numbered_list(lines, h[0])]
     if rule.sequential:
         numbered = [k for k, h in enumerate(hits) if h[1] is not None]
         keep = {numbered[k] for k in _best_chain([hits[k][1] for k in numbered])}
@@ -525,6 +528,43 @@ def _next_nonblank(lines: list[str], i: int, limit: int = 3) -> int | None:
     return None
 
 
+def _prev_nonblank(lines: list[str], i: int, limit: int = 3) -> int | None:
+    for j in range(i - 1, max(-1, i - 1 - limit), -1):
+        if lines[j].strip():
+            return j
+    return None
+
+
+# A numbered list item: "1. text", "2) text", "① text".
+_LIST_ITEM = re.compile(r"^(?:(\d{1,3})[.)]\s+\S|([①-⑳])\s*\S)")
+
+
+def _list_number(line: str) -> int | None:
+    m = _LIST_ITEM.match(line.strip())
+    if not m:
+        return None
+    return int(m.group(1)) if m.group(1) else ord(m.group(2)) - 0x2460 + 1
+
+
+def _in_numbered_list(lines: list[str], i: int) -> bool:
+    """True when line i is one item of a bullet list rather than a chapter heading.
+
+    Lists come as runs ("1. …", "2. …", "3. …" on neighbouring lines, often under a
+    "[챕터2 탈출]" box); real "1. Title" headings stand alone, chapters apart. So a
+    numbered line whose nearest non-blank neighbour is the previous or next item of
+    the same list is a bullet point.
+    """
+    n = _list_number(lines[i])
+    if n is None:
+        return False
+    for j in (_prev_nonblank(lines, i), _next_nonblank(lines, i)):
+        if j is not None:
+            other = _list_number(lines[j])
+            if other is not None and abs(other - n) == 1:
+                return True
+    return False
+
+
 def _prefixed_hits(lines: list[str], rule, taken) -> list[tuple]:
     """Headings with a recurring prefix, e.g. "<work title> 127화"."""
     found: dict[str, list] = {}
@@ -580,13 +620,20 @@ class SmartRule:
     numtype = "int"
     sequential = False
 
-    def __init__(self, base: list | None = None, split_notes: bool = False):
+    def __init__(self, base: list | None = None, split_notes: bool = False,
+                 with_defaults: bool = False):
         self.base = [r for r in (base or []) if r]
         self.split_notes = split_notes
+        self.with_defaults = with_defaults  # pasted examples + the built-in styles
         self.name = "smart detection"
 
     def find(self, lines: list[str]) -> list[tuple]:
-        base = self.base or [r for r in [detect_rule(lines)] if r]
+        base = list(self.base)
+        if not base or self.with_defaults:
+            detected = detect_rule(lines)
+            if detected and all(detected.regex.pattern != getattr(r, "regex", re.compile("")).pattern
+                                for r in base):
+                base.append(detected)
         hits: dict[int, tuple] = {}
         for rule in base:
             for h in find_headings(lines, rule, self.split_notes):
@@ -599,7 +646,8 @@ class SmartRule:
 
         mask = _block_mask(lines)
         titleish = lambda i: (_titleish(lines, i) and not mask[i]
-                              and not _AUTHOR_NOTE.match(lines[i].strip()))
+                              and not _AUTHOR_NOTE.match(lines[i].strip())
+                              and not _in_numbered_list(lines, i))
         consumed = set()
         # A heading directly followed by another heading for the same chapter, e.g.
         #   < 천마를 삼켰다 외전 1화 >
@@ -783,6 +831,49 @@ def tidy_chapters(chapters: list[Chapter]) -> list[Chapter]:
     for n, c in enumerate([c for c in out if c.index > 0], 1):
         c.index = n
     return out
+
+
+def _text_size(lines: list[str]) -> int:
+    return sum(len(re.sub(r"\s+", "", ln)) for ln in lines)
+
+
+def exclude_outliers(chapters: list[Chapter], percent: int) -> tuple[list[Chapter], list[str]]:
+    """Undo chapter splits whose chapter is far shorter than the book's typical one.
+
+    A chapter with less text than ``percent``% of the median chapter is treated as a
+    false marker: its heading line goes back into the previous chapter as ordinary
+    text (into the next one if there is nothing before it). Prologues, epilogues, side
+    stories and author's notes are short by nature and are never merged away.
+    Returns the new chapter list and the headings that were undone.
+    """
+    real = [c for c in chapters if c.index > 0]
+    if len(real) < 3 or percent <= 0:
+        return chapters, []
+    sizes = sorted(_text_size(c.lines) for c in real)
+    limit = sizes[len(sizes) // 2] * percent / 100
+    out: list[Chapter] = []
+    undone: list[str] = []
+    carry: list[str] = []  # undone text waiting for a chapter to join (nothing before it)
+    for c in chapters:
+        lines = carry + c.lines if carry else c.lines
+        carry = []
+        protected = _is_special(c.heading) or _SIDE_STORY.search(c.heading)
+        if c.index > 0 and _text_size(c.lines) < limit and not protected:
+            undone.append(c.heading)
+            text = ["", c.heading, ""] + lines
+            if out:
+                prev = out[-1]
+                out[-1] = Chapter(prev.index, prev.number, prev.heading, prev.subtitle, prev.lines + text)
+            else:
+                carry = text
+            continue
+        out.append(Chapter(c.index, c.number, c.heading, c.subtitle, lines))
+    if carry and out:
+        last = out[-1]
+        out[-1] = Chapter(last.index, last.number, last.heading, last.subtitle, last.lines + carry)
+    for n, c in enumerate([c for c in out if c.index > 0], 1):
+        c.index = n
+    return out, undone
 
 
 def apply_spacing(lines: list[str], mode: str) -> list[str]:
@@ -1133,6 +1224,9 @@ class Settings:
     number_start: int = 1          # first number used by number_titles (0 or 1 …)
     number_files: bool = False     # separate-chapter file names get a "001 " prefix
     subfolders: bool = True        # each input's output in its own <name>_Converted folder
+    example_with_defaults: bool = False  # pasted examples AND the built-in heading styles
+    outlier_filter: bool = False   # undo splits whose chapter is far shorter than typical
+    outlier_percent: int = 25      # … shorter than this % of the median chapter length
 
     def output_options(self) -> OutputOptions:
         return OutputOptions(self.spacing == "remove", self.page_numbers, self.toc,
@@ -1174,7 +1268,7 @@ def _resolve_rule(settings: Settings, lines: list[str], naver_rule, tag: str, lo
     elif settings.mode == "auto":
         # One example per line; each becomes its own pattern.
         return SmartRule([rule_from_example(ex) for ex in settings.example.splitlines() if ex.strip()],
-                         settings.split_notes)
+                         settings.split_notes, settings.example_with_defaults)
     return SmartRule(split_notes=settings.split_notes)
 
 
@@ -1233,10 +1327,71 @@ def output_layout(paths: list[Path], settings: Settings) -> dict[Path, tuple[Pat
     return out
 
 
+OUTPUT_EXT = {".txt", ".pdf", ".epub", ".csv"}
+MANIFEST = ".converted_files.json"   # which files each input wrote into a shared folder
+_MANIFEST_LOCK = threading.Lock()
+
+
+def _manifest(out_dir: Path) -> dict:
+    try:
+        return json.loads((out_dir / MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def clear_previous_output(out_dir: Path, base: str, dedicated: bool,
+                          protect: set[str] | None = None) -> tuple[int, list[Path]]:
+    """Delete what the previous run for this input wrote, so stale files don't pile up.
+
+    Only files the converter creates are touched: the ones recorded for ``base`` in
+    the folder's manifest and — when the folder belongs to this input alone
+    (``dedicated``, i.e. a Converted/<name> subfolder) — any TXT/PDF/EPUB/CSV in it
+    and its TXT/PDF/EPUB chapter folders, which also covers output from older
+    versions. Input files listed in ``protect`` are never deleted.
+    Returns (files removed, files that could not be removed).
+    """
+    protect = {os.path.normcase(os.path.abspath(p)) for p in (protect or ())}
+    with _MANIFEST_LOCK:
+        candidates = [out_dir / rel for rel in _manifest(out_dir).get(base, [])]
+    if dedicated:
+        for folder in [out_dir] + [out_dir / f for f in ("TXT", "PDF", "EPUB")]:
+            if folder.is_dir():
+                candidates += [f for f in folder.iterdir()
+                               if f.is_file() and f.suffix.lower() in OUTPUT_EXT]
+    removed, locked = 0, []
+    for f in dict.fromkeys(candidates):
+        if os.path.normcase(os.path.abspath(f)) in protect or not f.is_file():
+            continue
+        try:
+            f.unlink()
+            removed += 1
+        except OSError:
+            locked.append(f)
+    for folder in [out_dir / f for f in ("TXT", "PDF", "EPUB")]:
+        try:
+            folder.rmdir()  # only succeeds when empty
+        except OSError:
+            pass
+    return removed, locked
+
+
+def record_output(out_dir: Path, base: str, files: list[Path]) -> None:
+    """Remember which files this input wrote, for clear_previous_output next time."""
+    with _MANIFEST_LOCK:
+        data = _manifest(out_dir)
+        data[base] = sorted(str(f.relative_to(out_dir)) for f in files)
+        try:
+            (out_dir / MANIFEST).write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                                            encoding="utf-8")
+        except OSError:
+            pass
+
+
 def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPoolExecutor,
                  log: LogFn, progress: ProgressFn, cancel: threading.Event | None = None,
-                 layout: tuple[Path, str] | None = None) -> dict:
+                 layout: tuple[Path, str] | None = None, protect: set[str] | None = None) -> dict:
     path = Path(path)
+    protect = set(protect or ()) | {str(path)}
     tag = f"[{path.name}]"
     log(f"{tag} Reading…")
     text = read_text(path)
@@ -1266,6 +1421,12 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
                 f"({len(chapters)} section(s)). Paste an example heading to split it.")
 
     chapters = tidy_chapters(chapters)
+    if settings.outlier_filter:
+        chapters, undone = exclude_outliers(chapters, settings.outlier_percent)
+        if undone:
+            shown = ", ".join(f"“{h}”" for h in undone[:5]) + ("…" if len(undone) > 5 else "")
+            log(f"{tag} Ignored {len(undone)} chapter marker(s) with unusually short chapters "
+                f"(< {settings.outlier_percent}% of typical length): {shown}")
     real = [c for c in chapters if c.index > 0]
     rows = [(c, c.title(settings.template), apply_spacing(c.lines, settings.spacing))
             for c in chapters]
@@ -1298,7 +1459,14 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
         key = name.lower()
         used[key] = used.get(key, 0) + 1
         file_names[id(ch)] = name if used[key] == 1 else f"{name} ({used[key]})"
-    jobs: list[tuple[str, Callable[[], None]]] = []  # (output format, write job)
+    removed, locked = clear_previous_output(out_dir, base, settings.subfolders, protect)
+    if removed:
+        log(f"{tag} Removed {removed} file(s) left from the previous run.")
+    if locked:
+        log(f"{tag} Could not remove {len(locked)} old file(s) (open in another program?): "
+            + ", ".join(p.name for p in locked[:3]) + ("…" if len(locked) > 3 else ""))
+
+    jobs: list[tuple[str, Path, Callable[[], None]]] = []  # (format, target file, write job)
     for fmt in ("txt", "pdf", "epub"):
         if fmt not in settings.formats:
             continue
@@ -1308,19 +1476,20 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
             if target.resolve() == path.resolve():  # e.g. book.txt -> book.txt next to the source
                 target = out_dir / f"{base}_converted.{fmt}"
             if fmt == "pdf" and settings.keep_layout and path.suffix.lower() == ".epub":
-                jobs.append((fmt, lambda t=target: _layout_pdf(path, t, path.stem, sections,
-                                                               settings, tag, log)))
+                jobs.append((fmt, target, lambda t=target: _layout_pdf(path, t, path.stem, sections,
+                                                                       settings, tag, log)))
             else:
-                jobs.append((fmt, lambda w=writer, t=target: w(t, path.stem, sections, opts)))
+                jobs.append((fmt, target, lambda w=writer, t=target: w(t, path.stem, sections, opts)))
         else:
             fmt_dir = out_dir / fmt.upper()
             fmt_dir.mkdir(exist_ok=True)
             for ch, title, body in rows:
                 target = fmt_dir / f"{file_names[id(ch)]}.{fmt}"
-                jobs.append((fmt, lambda w=writer, t=target, ti=title, b=body:
+                jobs.append((fmt, target, lambda w=writer, t=target, ti=title, b=body:
                              w(t, ti, [(ti, b)], opts)))
     if "csv" in settings.formats:
-        jobs.append(("csv", lambda: write_master_csv(out_dir / f"{base}_master.csv", path.name, rows)))
+        csv_target = out_dir / f"{base}_master.csv"
+        jobs.append(("csv", csv_target, lambda: write_master_csv(csv_target, path.name, rows)))
 
     def guarded(job) -> bool:
         if cancel is not None and cancel.is_set():
@@ -1330,16 +1499,20 @@ def process_file(path: Path, settings: Settings, naver_rule, io_pool: ThreadPool
 
     failures = 0
     written: dict[str, int] = {}  # output format -> files written
-    futures = {io_pool.submit(guarded, job): fmt for fmt, job in jobs}
+    created: list[Path] = []
+    futures = {io_pool.submit(guarded, job): (fmt, target) for fmt, target, job in jobs}
     for done, fut in enumerate(as_completed(futures), 1):
+        fmt, target = futures[fut]
         try:
             if fut.result():
-                written[futures[fut]] = written.get(futures[fut], 0) + 1
+                written[fmt] = written.get(fmt, 0) + 1
+                created.append(target)
         except Exception as e:  # keep going; one bad chapter shouldn't sink the file
             failures += 1
             if failures <= 5:
                 log(f"{tag} ERROR writing a file: {type(e).__name__}: {e}")
         progress(0.2 + 0.8 * done / len(futures))
+    record_output(out_dir, base, created)
     progress(1.0)
     if cancel is not None and cancel.is_set():
         log(f"{tag} Cancelled.")
@@ -1369,12 +1542,13 @@ def process_batch(paths: list[Path], settings: Settings, log: LogFn, progress: P
         return update
 
     layouts = output_layout(paths, settings)
+    inputs = {str(Path(p)) for p in paths}  # never deleted when clearing old output
 
     def run(i: int, p: Path) -> dict:
         if cancel is not None and cancel.is_set():
             return {"file": Path(p), "error": "cancelled"}
         return process_file(p, settings, naver_rule, io_pool, log, file_progress(i), cancel,
-                            layouts[Path(p)])
+                            layouts[Path(p)], inputs)
 
     results = []
     workers = clamp_workers(settings.workers)
