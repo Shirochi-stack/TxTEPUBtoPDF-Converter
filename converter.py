@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 import engine
 
 APP_NAME = "File Converter"
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 SETTINGS_FILE = APP_DIR / "config.json"
 SETTINGS_VERSION = 2
@@ -363,11 +363,14 @@ class FileConverter(QWidget):
         prefix_row.addSpacing(28)
         prefix_row.addWidget(QLabel("Parallel threads:"))
         self.threads_spin = NoScrollSpinBox()
-        self.threads_spin.setRange(1, 64)
+        self.threads_spin.setRange(1, engine.LOGICAL_CORES)  # out-of-range saved values clamp
         self.threads_spin.setFixedWidth(70)
         self.threads_spin.setValue(s.get("threads", engine.DEFAULT_WORKERS))
         self.threads_spin.valueChanged.connect(self.on_option_changed)
+        cores = f"{engine.LOGICAL_CORES} logical core{'s' if engine.LOGICAL_CORES != 1 else ''}"
+        self.threads_spin.setToolTip(f"1 – {engine.LOGICAL_CORES} (this PC has {cores})")
         prefix_row.addWidget(self.threads_spin)
+        prefix_row.addWidget(QLabel(f"/ {cores}", objectName="hint"))
         prefix_row.addStretch()
         root.addLayout(prefix_row)
 
@@ -663,6 +666,11 @@ class FileConverter(QWidget):
 def run_cli(argv):
     """Headless batch mode: converter --cli [options] files/folders…"""
     import argparse
+    for stream in (sys.stdout, sys.stderr):  # e.g. "→" or Korean titles on a cp1252 console
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     parser = argparse.ArgumentParser(prog="converter --cli")
     parser.add_argument("paths", nargs="+", help="TXT / PDF / EPUB files or folders")
     parser.add_argument("--formats", default="pdf", help="comma list of txt,pdf,epub,csv")
@@ -674,7 +682,8 @@ def run_cli(argv):
     parser.add_argument("--toc", action="store_true", help="add a table of contents to PDFs")
     parser.add_argument("--keep-layout", action="store_true",
                         help="EPUB → PDF through WeasyPrint (images + CSS)")
-    parser.add_argument("--threads", type=int, default=engine.DEFAULT_WORKERS)
+    parser.add_argument("--threads", type=engine.clamp_workers, default=engine.DEFAULT_WORKERS,
+                        help=f"1-{engine.LOGICAL_CORES} (logical cores on this PC)")
     parser.add_argument("--log", default=None, help="also write the log to this file")
     args = parser.parse_args(argv)
     lines = []

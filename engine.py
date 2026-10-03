@@ -22,7 +22,13 @@ from urllib.parse import unquote
 from xml.sax.saxutils import escape as xml_escape
 
 SUPPORTED_EXT = (".txt", ".pdf", ".epub")
-DEFAULT_WORKERS = 2
+LOGICAL_CORES = os.cpu_count() or 1
+DEFAULT_WORKERS = min(2, LOGICAL_CORES)
+
+
+def clamp_workers(n: int) -> int:
+    """Thread count limited to 1 … the machine's logical core count."""
+    return max(1, min(int(n), LOGICAL_CORES))
 
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[float], None]
@@ -1210,7 +1216,7 @@ def process_batch(paths: list[Path], settings: Settings, log: LogFn, progress: P
         return process_file(p, settings, naver_rule, io_pool, log, file_progress(i), cancel)
 
     results = []
-    workers = max(1, settings.workers)
+    workers = clamp_workers(settings.workers)
     log(f"Processing {len(paths)} file(s) with {workers} worker threads…")
     # Separate pools: file tasks block on their write tasks, so sharing one could deadlock.
     with ThreadPoolExecutor(min(workers, len(paths)), thread_name_prefix="file") as file_pool, \
@@ -1256,7 +1262,7 @@ def merge_files(paths: list[Path], out_path: Path, settings: Settings, log: LogF
     fmt = out_path.suffix.lower().lstrip(".")
     if fmt not in _WRITERS:
         raise ValueError("Output file must end in .txt, .pdf or .epub")
-    workers = max(1, settings.workers)
+    workers = clamp_workers(settings.workers)
     log(f"Merging {len(paths)} files → {out_path.name} ({workers} reader threads)…")
     loaded: list = [None] * len(paths)
     with ThreadPoolExecutor(workers, thread_name_prefix="read") as pool:
